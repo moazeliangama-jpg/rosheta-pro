@@ -8,11 +8,13 @@ contextBridge.exposeInMainWorld("roshetta", {
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
   setWorkers: (maxWorkers) => ipcRenderer.invoke("nd:set-workers", { maxWorkers }),
+  warmup: (workersCount) => ipcRenderer.invoke("nd:warmup", { workers: workersCount }),
   login: (payload) => ipcRenderer.invoke("nd:login", payload),
   status: () => ipcRenderer.invoke("nd:status"),
   searchSub: (payload) => ipcRenderer.invoke("nd:search", payload),
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),
   deleteForm: (payload) => ipcRenderer.invoke("nd:delete", payload),
+  deletes: () => ipcRenderer.invoke("nd:deletes"),
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
 

@@ -4,12 +4,14 @@ const require = createRequire(import.meta.url);
 const S = require("../electron/snippets.cjs");
 
 const scripts = {
-  selectPayerScript: S.selectPayerScript("1", "الأهلي"),
+  fastSearchScript: S.fastSearchScript({ sab: "123", payerId: "1", payerName: "الأهلي" }),
+  quickParseScript: S.quickParseScript,
+  clickReferenceScript: S.clickReferenceScript("1900047"),
+  captureImageScript: S.captureImageScript({}),
   CLOSE_MODAL_SCRIPT: S.CLOSE_MODAL_SCRIPT,
-  fillCodeScript: S.fillCodeScript("12345"),
-  CLICK_SEARCH_SCRIPT: S.CLICK_SEARCH_SCRIPT,
+  PAGE_STATE_SCRIPT: S.PAGE_STATE_SCRIPT,
+  HAS_DELETE_SCRIPT: S.HAS_DELETE_SCRIPT,
   PARSE_RESULTS_SCRIPT: S.PARSE_RESULTS_SCRIPT,
-  EXTRACT_IMAGE_SCRIPT: S.EXTRACT_IMAGE_SCRIPT,
   FIND_IMAGE_LINK_SCRIPT: S.FIND_IMAGE_LINK_SCRIPT,
   CLICK_DELETE_SCRIPT: S.CLICK_DELETE_SCRIPT,
   WA_STATE_SCRIPT: S.WA_STATE_SCRIPT,

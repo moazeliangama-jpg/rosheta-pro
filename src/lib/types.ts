@@ -149,6 +149,12 @@ export interface SessionMeta {
   failures: number;
   workers: number;
   autoWorkers: boolean;
+  turbo: boolean;
+  avgSearchMs: number;
+  avgCaptureMs: number;
+  formsPerMin: number;
+  etaMin: number | null;
+  deletePending: number;
   decisions: string[];
   lastTuneAt: number;
 }
@@ -182,7 +188,9 @@ export interface Settings {
   receptionNumbers: string;
   sessionTime: string;
   reportTime: string;
-  workerChoice: "auto" | "3" | "5" | "8" | "10";
+  workerChoice: "auto" | "5" | "8" | "12" | "16";
+  /** وضع السرعة القصوى: تسخين نوافذ + إرجاع في الخلفية + إعادة استخدام النتائج */
+  turboMode: boolean;
   /** 6 أيام افتراضيًا */
   validityDays: number;
   /** منع الضغط على Delete (الإرجاع) — افتراضيًا الضغط بيتم زي طريقة الصرف */

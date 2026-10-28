@@ -4,28 +4,55 @@ import type { CaseRecord } from "../lib/types";
 import { Badge, Button } from "./ui";
 import { cn } from "../lib/utils";
 import { downloadImage } from "../lib/excel";
+import { getCachedImage, getImage } from "../lib/imageCache";
 
 export const SOURCE_LABEL: Record<string, string> = {
   "pre-approval": "Pre-Approval",
   claim: "Claim",
 };
 
-export function formTitle(c: CaseRecord) {
-  return `ساب ${c.sab} • مرجع ${c.reference}`;
-}
-
 /**
- * عارض صورة الروشتة.
- * كل حالة ليها معنى واضح: تحميل / صورة / فشل بسبب مكتوب + إعادة محاولة.
- * الصورة بتتحفظ كـ dataURL من نافذة نايس دير الحقيقية، فبتظهر حتى لو الجلسة اتقفلت.
+ * بيجيب صورة الاستمارة من الكاش أو من IndexedDB.
+ * الصورة مش متخزنة في حالة React — عشان البرنامج يفضل سريع مع مئات الروشتات.
  */
-export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: string; onRetry?: () => void }) {
-  const [loaded, setLoaded] = useState(false);
-  const [broken, setBroken] = useState(false);
-  const src = c.rx.dataUrl;
+export function useRxSrc(c: CaseRecord) {
+  const [src, setSrc] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    setLoaded(false);
+    let alive = true;
+    const inline = c.rx.dataUrl || getCachedImage(c.id);
+    if (inline) {
+      setSrc(inline);
+      setLoading(false);
+      return;
+    }
+    if (c.rx.status !== "ready") {
+      setSrc(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    void getImage(c.id).then((value) => {
+      if (!alive) return;
+      setSrc(value);
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [c.id, c.rx.status, c.rx.dataUrl]);
+
+  return { src, loading };
+}
+
+export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: string; onRetry?: () => void }) {
+  const { src, loading } = useRxSrc(c);
+  const [drawn, setDrawn] = useState(false);
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    setDrawn(false);
     setBroken(false);
   }, [src]);
 
@@ -34,7 +61,7 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
       <Frame className={className}>
         <div className="flex flex-col items-center gap-2 text-white/60">
           <Loader2 className="h-7 w-7 animate-spin text-teal-400" />
-          <span className="text-sm">جارٍ فتح نافذة الروشتة في نايس دير…</span>
+          <span className="text-sm">جارٍ فتح نافذة الروشتة والتقاط الصورة…</span>
           {c.rx.attempts > 0 ? <span className="text-xs text-amber-300">محاولة {c.rx.attempts} من 3</span> : null}
           {c.rx.reason ? <span className="max-w-xs text-center text-xs text-white/40">{c.rx.reason}</span> : null}
         </div>
@@ -42,17 +69,43 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
     );
   }
 
-  if (c.rx.status === "failed" || !src) {
+  if (loading) {
+    return (
+      <Frame className={className}>
+        <div className="flex flex-col items-center gap-2 text-white/50">
+          <Loader2 className="h-6 w-6 animate-spin text-teal-400" />
+          <span className="text-xs">بيحمّل الصورة من التخزين…</span>
+        </div>
+      </Frame>
+    );
+  }
+
+  if (c.rx.status === "failed") {
     return (
       <Frame className={className} tone="bad">
         <div className="flex flex-col items-center gap-2 px-4 text-center">
           <ImageOff className="h-7 w-7 text-rose-400" />
           <span className="text-sm font-semibold text-rose-200">صورة الروشتة لم تُلتقط</span>
-          <span className="max-w-xs text-xs leading-relaxed text-white/50">
-            {c.rx.reason || "لم تُرجع نافذة نايس دير صورة"}
-          </span>
+          <span className="max-w-xs text-xs leading-relaxed text-white/50">{c.rx.reason || "لم تُرجع نافذة نايس دير صورة"}</span>
           {onRetry ? (
             <Button size="sm" variant="ghost" onClick={onRetry} className="mt-1">
+              <RotateCcw className="h-3.5 w-3.5" /> إعادة الجلب
+            </Button>
+          ) : null}
+        </div>
+      </Frame>
+    );
+  }
+
+  if (!src) {
+    return (
+      <Frame className={className} tone="bad">
+        <div className="flex flex-col items-center gap-2 px-4 text-center">
+          <AlertTriangle className="h-7 w-7 text-amber-400" />
+          <span className="text-sm font-semibold text-amber-200">الصورة مش في التخزين المحلي</span>
+          <span className="max-w-xs text-xs text-white/50">ممكن تكون اتمسحت. اضغط إعادة الجلب لالتقاطها من نايس دير.</span>
+          {onRetry ? (
+            <Button size="sm" variant="ghost" onClick={onRetry}>
               <RotateCcw className="h-3.5 w-3.5" /> إعادة الجلب
             </Button>
           ) : null}
@@ -67,7 +120,6 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
         <div className="flex flex-col items-center gap-2 px-4 text-center">
           <AlertTriangle className="h-7 w-7 text-amber-400" />
           <span className="text-sm font-semibold text-amber-200">الصورة وصلت لكن تعذر رسمها</span>
-          <span className="max-w-xs text-xs text-white/50">صيغة غير مدعومة — أعد الجلب.</span>
           {onRetry ? (
             <Button size="sm" variant="ghost" onClick={onRetry}>
               <RotateCcw className="h-3.5 w-3.5" /> إعادة الجلب
@@ -80,7 +132,7 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
 
   return (
     <div className={cn("relative overflow-hidden rounded-xl border border-white/10 bg-black/40", className)}>
-      {!loaded ? (
+      {!drawn ? (
         <div className="absolute inset-0 flex items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-teal-400" />
         </div>
@@ -88,9 +140,9 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
       <img
         src={src}
         alt={`روشتة ${c.sab} — ${c.reference}`}
-        onLoad={() => setLoaded(true)}
+        onLoad={() => setDrawn(true)}
         onError={() => setBroken(true)}
-        className={cn("h-full w-full object-contain transition-opacity duration-300", loaded ? "opacity-100" : "opacity-0")}
+        className={cn("h-full w-full object-contain transition-opacity duration-200", drawn ? "opacity-100" : "opacity-0")}
         draggable={false}
       />
     </div>
@@ -111,8 +163,8 @@ function Frame({ children, className, tone }: { children: React.ReactNode; class
   );
 }
 
-/** عارض مكبّر — تكبير/تصغير/تنزيل/إغلاق */
 export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: () => void; onRetry?: () => void }) {
+  const { src, loading } = useRxSrc(c);
   const [zoom, setZoom] = useState(1);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
 
@@ -153,11 +205,7 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
           <Button size="sm" variant="ghost" onClick={() => setZoom(1)} aria-label="الحجم الطبيعي">
             <Maximize2 className="h-4 w-4" />
           </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() => c.rx.dataUrl && downloadImage(c.rx.dataUrl, `${c.sab}-${c.reference}`)}
-          >
+          <Button size="sm" variant="ghost" disabled={!src} onClick={() => src && downloadImage(src, `${c.sab}-${c.reference}`)}>
             <Download className="h-4 w-4" /> تنزيل
           </Button>
           <Button size="sm" variant="danger" onClick={onClose} aria-label="إغلاق">
@@ -168,9 +216,14 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
 
       <div className="flex-1 overflow-auto p-4">
         <div className="mx-auto flex min-h-full items-start justify-center">
-          {c.rx.dataUrl ? (
+          {loading ? (
+            <div className="flex flex-col items-center gap-2 py-20 text-white/50">
+              <Loader2 className="h-7 w-7 animate-spin text-teal-400" />
+              <span className="text-xs">بيحمّل الصورة…</span>
+            </div>
+          ) : src ? (
             <img
-              src={c.rx.dataUrl}
+              src={src}
               alt={`${c.sab}`}
               onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
               style={{ width: `${Math.round(zoom * 100)}%`, maxWidth: zoom <= 1 ? "820px" : "none" }}

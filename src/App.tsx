@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Activity, ClipboardList, FlaskConical, ListChecks, Settings2, ShieldOff } from "lucide-react";
 import { useAppStore } from "./lib/store";
-import { SessionEngine, refreshValidity, repairMissingImages } from "./lib/engine";
+import { SessionEngine, refreshValidity } from "./lib/engine";
 import { hasDesktopBridge, bridge } from "./lib/provider";
 import { SetupScreen } from "./screens/SetupScreen";
 import { RunScreen } from "./screens/RunScreen";
@@ -42,7 +42,6 @@ export default function App() {
   useEffect(() => {
     void hydrateImages();
     const t = setTimeout(() => {
-      repairMissingImages();
       refreshValidity();
     }, 800);
     const b = bridge();

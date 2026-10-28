@@ -343,7 +343,7 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
             <div className="text-xs text-white/50">عدد نوافذ نايس دير</div>
             <div className="mt-1.5 flex gap-1">
-              {(["auto", "3", "5", "8", "10"] as const).map((v) => (
+              {(["auto", "5", "8", "12", "16"] as const).map((v) => (
                 <button
                   key={v}
                   onClick={() => setSettings({ workerChoice: v })}
@@ -370,6 +370,12 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
             onChange={(v) => setSettings({ includeInvalid: v })}
             label="جلب صور خارج المدة"
             hint="افتراضيًا بنجيب الصور للمستمارات داخل المدة بس"
+          />
+          <Toggle
+            checked={settings.turboMode}
+            onChange={(v) => setSettings({ turboMode: v })}
+            label="الوضع المرعب ⚡ (Turbo)"
+            hint="تسخين النوافذ + إعادة استخدام نتائج البحث + إرجاع Delete في الخلفية"
           />
         </div>
 

@@ -11,9 +11,15 @@ export interface RoshettaBridge {
   version: string;
   setCredentials: (p: { username?: string; password?: string; maxWorkers?: number }) => Promise<BridgeResult>;
   setWorkers: (n: number) => Promise<BridgeResult>;
+  warmup: (workers: number) => Promise<BridgeResult<{ workers: number; ms: number; loggedIn: boolean }>>;
+  deletes: () => Promise<
+    BridgeResult<{ pending: number; running: number; results: Record<string, { state: string; ms?: number; error?: string }> }>
+  >;
   login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number }>;
-  searchSub: (p: { sab: string; payerId: string; payerName: string }) => Promise<BridgeResult<NdSearchResult>>;
+  searchSub: (p: { sab: string; payerId: string; payerName: string }) => Promise<
+    BridgeResult<NdSearchResult> & { ms?: number }
+  >;
   fetchFormImage: (p: {
     sab: string;
     reference: string;
@@ -22,7 +28,16 @@ export interface RoshettaBridge {
     payerId: string;
     payerName: string;
     preventDelete: boolean;
-  }) => Promise<BridgeResult<{ dataUrl: string; method: string; deleted: boolean; deleteState: string; attemptsLog: string[] }>>;
+  }) => Promise<
+    BridgeResult<{
+      dataUrl: string;
+      method: string;
+      deleted: boolean;
+      deleteState: string;
+      timings?: { searchMs?: number; clickMs?: number; captureMs?: number; totalMs?: number };
+      notes?: string[];
+    }>
+  >;
   deleteForm: (p: { sab: string; reference: string; source: string; payerId: string; payerName: string }) => Promise<BridgeResult>;
   logoutNiceDeer: () => Promise<BridgeResult>;
   openSearchSite: () => Promise<BridgeResult>;
