@@ -38,9 +38,22 @@ async function withStore<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) =>
   });
 }
 
+/** الصور بتتحفظ مع وقت الالتقاط عشان نقدر نمسح القديم تلقائيًا */
+interface StoredImage {
+  dataUrl: string;
+  at: number;
+}
+
+/** الصورة أقدم من المدة المسموحة؟ (بتحسب على الساعة الحقيقية) */
+export function isExpired(at: number, days = 30, now = Date.now()) {
+  if (!at) return false;
+  return now - at > days * 24 * 60 * 60 * 1000;
+}
+
 export async function saveImage(id: string, dataUrl: string) {
   try {
-    await withStore("readwrite", (s) => s.put(dataUrl, id));
+    const value: StoredImage = { dataUrl, at: Date.now() };
+    await withStore("readwrite", (s) => s.put(value, id));
   } catch (err) {
     console.warn("تعذر حفظ صورة الروشتة محليًا", err);
   }
@@ -48,10 +61,43 @@ export async function saveImage(id: string, dataUrl: string) {
 
 export async function loadImage(id: string): Promise<string | null> {
   try {
-    const v = await withStore<string | undefined>("readonly", (s) => s.get(id));
-    return v ?? null;
+    const v = await withStore<string | StoredImage | undefined>("readonly", (s) => s.get(id));
+    if (!v) return null;
+    if (typeof v === "string") return v;
+    return v.dataUrl ?? null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * ٥٤) حذف الصور الأقدم من ٣٠ يوم: مجلد الإكسل والصور بيكبر مع كل جلسة،
+ * وتخزين صورة كل روشتة للأبد بيملّي الجهاز بلا داعي — الصورة بتخلص صلاحيتها أصلًا.
+ * الصور القديمة (المحفوظة كنص من نسخة أقدم) بتفضل زي ما هي.
+ */
+export async function pruneImages(days = 30, now = Date.now()): Promise<number> {
+  try {
+    const db = await openDb();
+    return await new Promise<number>((resolve) => {
+      let removed = 0;
+      const tx = db.transaction(STORE, "readwrite");
+      const store = tx.objectStore(STORE);
+      const req = store.openCursor();
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        const value = cursor.value as StoredImage | string;
+        if (typeof value === "object" && value && isExpired(value.at, days, now)) {
+          cursor.delete();
+          removed += 1;
+        }
+        cursor.continue();
+      };
+      tx.oncomplete = () => resolve(removed);
+      tx.onerror = () => resolve(removed);
+    });
+  } catch {
+    return 0;
   }
 }
 

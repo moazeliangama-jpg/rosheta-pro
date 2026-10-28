@@ -6,18 +6,41 @@ import type { BridgeResult, NdSearchResult } from "./types";
  * بيرمي خطأ صريح بدل ما يرجع بيانات وهمية.
  */
 
+export interface SystemInfo {
+  maxWorkers: number;
+  maxDeleters: number;
+  cores: number;
+  totalMb: number;
+  freeMb: number;
+  workers: number;
+  captures: number;
+  platform: string;
+  electron: string;
+}
+
 export interface RoshettaBridge {
   platform: string;
   version: string;
   setCredentials: (p: { username?: string; password?: string; maxWorkers?: number }) => Promise<BridgeResult>;
-  setWorkers: (n: number) => Promise<BridgeResult>;
+  setWorkers: (n: number) => Promise<BridgeResult<{ maxWorkers: number; captures: number; info?: SystemInfo }>>;
+  /** ضبط عدد النوافذ من القياس الحقيقي (بيرفض الزيادة لو الرام قربت تخلص) */
+  tune: (workers: number) => Promise<BridgeResult<{ workers: number; captures: number; rejected: boolean; freeMb: number }>>;
+  /** حظر نوم الجهاز أثناء الجلسة */
+  busy: (active: boolean) => Promise<BridgeResult<{ active: boolean }>>;
   warmup: (workers: number) => Promise<BridgeResult<{ workers: number; ms: number; loggedIn: boolean }>>;
   deletes: () => Promise<
-    BridgeResult<{ pending: number; running: number; results: Record<string, { state: string; ms?: number; error?: string }> }>
+    BridgeResult<{
+      pending: number;
+      running: number;
+      retryable?: number;
+      results: Record<string, { state: string; ms?: number; error?: string }>;
+    }>
   >;
+  /** إعادة محاولة الإرجاعات الفاشلة مرة واحدة */
+  retryDeletes: () => Promise<BridgeResult<{ retried: number }>>;
   login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
-  status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number }>;
-  searchSub: (p: { sab: string; payerId: string; payerName: string }) => Promise<
+  status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
+  searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<
     BridgeResult<NdSearchResult> & { ms?: number }
   >;
   fetchFormImage: (p: {
@@ -34,6 +57,10 @@ export interface RoshettaBridge {
       method: string;
       deleted: boolean;
       deleteState: string;
+      /** طول طابور الإرجاع في الخلفية بعد إضافة الاستمارة دي */
+      deleteQueue?: number;
+      /** الصورة اتجابت من نتائج البحث المفتوحة (بدون بحث جديد) */
+      reusedSearch?: boolean;
       timings?: { searchMs?: number; clickMs?: number; captureMs?: number; totalMs?: number };
       notes?: string[];
     }>
@@ -50,6 +77,8 @@ export interface RoshettaBridge {
     openChat: (p: { phone: string; text?: string }) => Promise<BridgeResult>;
   };
   closeAll: () => Promise<boolean>;
+  openExportFolder: () => Promise<BridgeResult<{ dir: string }>>;
+  notify: (p: { title: string; body: string }) => Promise<BridgeResult>;
   openExternal: (url: string) => Promise<boolean>;
 }
 

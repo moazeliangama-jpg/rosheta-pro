@@ -12,11 +12,19 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../lib/store";
 import { orderedCases, monthlyList } from "../lib/engine";
-import { buildOutreachQueue, classifyReply, replyStats } from "../lib/whatsapp";
-import { exportApproved, exportSessionReport, exportWithDrugs } from "../lib/excel";
+import {
+  buildOutreachQueue,
+  classifyReply,
+  isSameReply,
+  jitteredDelay,
+  replyStats,
+  selectSendable,
+  sentToday,
+  validatePhone,
+} from "../lib/whatsapp";
 import { Badge, Button, Card, EmptyState, Progress, SectionTitle, Stat } from "../components/ui";
 import { bridge } from "../lib/provider";
-import { cn, nowTime } from "../lib/utils";
+import { cn, dateKey, nowTime } from "../lib/utils";
 import type { OutreachMessage } from "../lib/types";
 
 const KIND_LABEL: Record<OutreachMessage["kind"], string> = {
@@ -69,8 +77,14 @@ export function ResultsScreen() {
   const sendOne = async (m: OutreachMessage) => {
     const b = bridge();
     if (!b) return { ok: false, error: "نسخة سطح المكتب مطلوبة" };
+    // ٨٦) الرقم بيتحقق ويتظبط قبل الإرسال — رقم غلط بيضيّع وقت وبيزود الفشل
+    const check = validatePhone(m.phone);
+    if (!check.ok) {
+      patchOutreach(m.id, { status: "failed", error: check.reason });
+      return { ok: false, error: check.reason };
+    }
     patchOutreach(m.id, { status: "sending" });
-    const res = await b.wa.send({ phone: m.phone, text: m.text });
+    const res = await b.wa.send({ phone: check.phone, text: m.text });
     if (res.ok) {
       patchOutreach(m.id, { status: "sent", at: Date.now(), error: undefined });
       return { ok: true };
@@ -80,11 +94,18 @@ export function ResultsScreen() {
   };
 
   const sendAll = async () => {
-    const pending = outreach.filter((m) => m.status === "queued" || m.status === "failed");
+    // ٩٢) الحد اليومي بيحسب المرسل النهاردة فعلًا
+    const { list: pending, blocked } = selectSendable(outreach, settings.dailySendLimit, dateKey());
     if (!pending.length) {
-      logLine("warn", "مفيش رسائل في الانتظار — اضغط «تجهيز الرسائل» الأول.");
+      logLine(
+        "warn",
+        blocked
+          ? `وصلت للحد اليومي (${settings.dailySendLimit} رسالة) — الباقي ${blocked} رسالة لبكرة.`
+          : "مفيش رسائل في الانتظار — اضغط «تجهيز الرسائل» الأول.",
+      );
       return;
     }
+    if (blocked) logLine("warn", `${blocked} رسالة اتأجلت لبكرة بسبب الحد اليومي (${settings.dailySendLimit}).`);
     stopRef.current = false;
     setBusy("send");
     setSendProgress({ done: 0, total: pending.length });
@@ -95,7 +116,10 @@ export function ResultsScreen() {
       const res = await sendOne(m);
       if (res.ok) okCount += 1;
       setSendProgress({ done: i + 1, total: pending.length });
-      if (i < pending.length - 1) await new Promise((r) => setTimeout(r, settings.sendDelaySec * 1000));
+      // ٨٥) فاصل بعشوائية صغيرة حوالين القيمة بدل رقم ثابت تمامًا
+      if (i < pending.length - 1) {
+        await new Promise((r) => setTimeout(r, jitteredDelay(settings.sendDelaySec, settings.sendJitterPct)));
+      }
     }
     setBusy(null);
     logLine(okCount === pending.length ? "ok" : "warn", `تم إرسال ${okCount} من ${pending.length} رسالة.`);
@@ -110,7 +134,7 @@ export function ResultsScreen() {
     let updated = 0;
     for (const m of sent) {
       const res = await b.wa.replies({ phone: m.phone });
-      if (res.ok && res.data?.last) {
+      if (res.ok && res.data?.last && !isSameReply(m, res.data.last)) {
         const cls = classifyReply(res.data.last, settings);
         patchOutreach(m.id, { reply: cls, replyText: res.data.last, replyAt: Date.now() });
         updated += 1;
@@ -130,6 +154,7 @@ export function ResultsScreen() {
         <Stat label="موافقون" value={stats.approved} tone="ok" />
         <Stat label="رافضون" value={stats.rejected} tone="bad" />
         <Stat label="طلب تأجيل" value={stats.postpone} tone="warn" />
+        <Stat label="مرسل النهاردة" value={`${sentToday(outreach, dateKey())} / ${settings.dailySendLimit}`} />
       </div>
 
       <Card>
@@ -151,21 +176,24 @@ export function ResultsScreen() {
           <Button variant="ghost" onClick={() => void syncReplies()} disabled={busy === "sync" || !stats.sent}>
             <RefreshCw className={cn("h-4 w-4", busy === "sync" && "animate-spin")} /> مزامنة الردود
           </Button>
-          <Button variant="ghost" onClick={() => exportApproved(all, outreach)}>
+          <Button variant="ghost" onClick={() => void import("../lib/excel").then((x) => x.exportApproved(all, outreach))}>
             <Download className="h-4 w-4" /> إكسل الموافقين
           </Button>
-          <Button variant="ghost" onClick={() => exportWithDrugs(all)}>
+          <Button variant="ghost" onClick={() => void import("../lib/excel").then((x) => x.exportWithDrugs(all))}>
             <Download className="h-4 w-4" /> إكسل بها دواء
           </Button>
           <Button
             variant="ghost"
             onClick={() =>
-              exportSessionReport({
-                cases: all,
-                failed,
-                samples,
-                sessionMs: session.startedAt ? (session.endedAt ?? Date.now()) - session.startedAt : 0,
-              })
+              void import("../lib/excel").then((x) =>
+                x.exportSessionReport({
+                  cases: all,
+                  failed,
+                  samples,
+                  steps: useAppStore.getState().steps,
+                  sessionMs: session.startedAt ? (session.endedAt ?? Date.now()) - session.startedAt : 0,
+                }),
+              )
             }
           >
             <Download className="h-4 w-4" /> تقرير التشغيل
@@ -286,7 +314,11 @@ export function ResultsScreen() {
             <CheckCheck className="h-4 w-4" />
             {approvedSabs.size} عميل وافق على الصرف — إكسل الموافقين جاهز للتصدير.
           </div>
-          <Button size="sm" variant="ghost" onClick={() => exportApproved(all, outreach)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => void import("../lib/excel").then((x) => x.exportApproved(all, outreach))}
+          >
             <Download className="h-3.5 w-3.5" /> تصدير
           </Button>
         </div>

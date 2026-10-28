@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { useAppStore } from "../lib/store";
 import { progressSummary } from "../lib/eligibility";
-import { exportFailed } from "../lib/excel";
+import { SpeedPanel } from "../components/SpeedPanel";
 import { Badge, Button, Card, EmptyState, Progress, SectionTitle, Stat } from "../components/ui";
 import { arNum, elapsedLabel, nowTime } from "../lib/utils";
 
@@ -160,19 +160,24 @@ export function RunScreen({
           <Button
             size="sm"
             variant="ghost"
-            onClick={() =>
-              exportFailed(failed, {
-                "مدة التشغيل": elapsedLabel(elapsed),
-                "عدد الاستمارات": stats.total,
-                "صور جاهزة": stats.ready,
-                "متعثرة": stats.failed,
-              })
-            }
+            onClick={() => {
+              // تحميل مكتبة الإكسل وقت التصدير بس — البرنامج بيفتح أسرع
+              void import("../lib/excel").then((x) =>
+                x.exportFailed(failed, {
+                  "مدة التشغيل": elapsedLabel(elapsed),
+                  "عدد الاستمارات": stats.total,
+                  "صور جاهزة": stats.ready,
+                  "متعثرة": stats.failed,
+                }),
+              );
+            }}
           >
             <Download className="h-3.5 w-3.5" /> إكسل المتعثرين
           </Button>
         </div>
       ) : null}
+
+      <SpeedPanel />
 
       <div className="grid gap-3 lg:grid-cols-2">
         <Card className="p-0">

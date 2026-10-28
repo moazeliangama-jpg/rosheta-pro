@@ -11,8 +11,10 @@ import type {
   SessionMeta,
   Settings,
   SpeedSample,
+  StepSample,
   Verdict,
 } from "./types";
+import type { SabCacheEntry } from "./prepare";
 import { saveImage } from "./imageStore";
 import { dateKey, uid } from "./utils";
 import { defaultSettings } from "./settings";
@@ -45,6 +47,10 @@ export const emptySession: SessionMeta = {
   deletePending: 0,
   decisions: [],
   lastTuneAt: 0,
+  lastSab: "",
+  bottleneck: "",
+  autoTuned: 0,
+  stuckWindows: 0,
 };
 
 /** يحافظ على صورة موجودة قوية لو التحديث الجديد جاي من غير صورة */
@@ -82,9 +88,15 @@ interface AppState {
   log: LogEntry[];
   session: SessionMeta;
   samples: SpeedSample[];
+  /** قياس كل خطوة — أساس تقرير السرعة وتحديد الاختناق */
+  steps: StepSample[];
+  /** كاش جرد اليوم: ساب اتجرد النهاردة مش بيتجرد تاني */
+  sabCache: Record<string, SabCacheEntry>;
   outreach: OutreachMessage[];
   screen: Screen;
   viewerId: string | null;
+  /** آخر روشتة اتفتحت — «استكمال من مكان الوقوف» في شاشة القرار */
+  lastDecisionId: string | null;
   imagesHydrated: boolean;
   niceDeerLoggedIn: boolean;
 
@@ -92,6 +104,8 @@ interface AppState {
   loadPatients: (patients: PatientRow[]) => void;
   resetRun: () => void;
   upsertCase: (record: CaseRecord) => void;
+  /** إدخال دفعة استمارات بتحديث واحد — أسرع بكتير من مئات التحديثات */
+  upsertCases: (records: CaseRecord[]) => void;
   patchCase: (id: string, patch: Partial<CaseRecord>) => void;
   setRxStatus: (id: string, rx: RxImage) => void;
   setImage: (id: string, dataUrl: string, method?: string) => void;
@@ -105,11 +119,16 @@ interface AppState {
   patchSession: (patch: Partial<SessionMeta>) => void;
   pushSample: (s: SpeedSample) => void;
   clearSamples: () => void;
+  pushSteps: (items: StepSample[]) => void;
+  clearSteps: () => void;
+  setSabCache: (sab: string, entry: SabCacheEntry) => void;
+  clearSabCache: (day?: string) => void;
   addOutreach: (items: OutreachMessage[]) => void;
   patchOutreach: (id: string, patch: Partial<OutreachMessage>) => void;
   clearOutreach: () => void;
   setScreen: (s: Screen) => void;
   setViewer: (id: string | null) => void;
+  setLastDecision: (id: string | null) => void;
   setLoggedIn: (v: boolean) => void;
   resetAll: () => void;
   hydrateImages: () => Promise<void>;
@@ -119,6 +138,13 @@ interface AppState {
  * كتابة localStorage مؤجلة: مع مئات الاستمارات، الكتابة مع كل تحديث كانت
  * بتعمل JSON.stringify لكل الحالة عشرات المرات في الثانية — ده كان بيبطّأ الواجهة.
  */
+let saveDelayMs = 600;
+
+/** أثناء التشغيل بنأجل الحفظ أكتر (كتابة كل ٣ ثواني) عشان الشغل ما يتعطلش */
+export function setSaveDelay(ms: number) {
+  saveDelayMs = Math.max(200, Math.min(10000, ms));
+}
+
 function debouncedStorage() {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let last: [string, string] | null = null;
@@ -158,7 +184,7 @@ function debouncedStorage() {
       timer = setTimeout(() => {
         timer = null;
         flush();
-      }, 600);
+      }, saveDelayMs);
     },
     removeItem: (key: string) => {
       try {
@@ -182,9 +208,12 @@ export const useAppStore = create<AppState>()(
       log: [],
       session: emptySession,
       samples: [],
+      steps: [],
+      sabCache: {},
       outreach: [],
       screen: "setup",
       viewerId: null,
+      lastDecisionId: null,
       imagesHydrated: false,
       niceDeerLoggedIn: false,
 
@@ -199,6 +228,7 @@ export const useAppStore = create<AppState>()(
           monthly: {},
           failed: [],
           samples: [],
+          steps: [],
           outreach: [],
           viewerId: null,
           session: { ...emptySession },
@@ -211,6 +241,26 @@ export const useAppStore = create<AppState>()(
             cases: { ...s.cases, [record.id]: mergeCase(prev, record) },
             caseOrder: prev || s.caseOrder.includes(record.id) ? s.caseOrder : [...s.caseOrder, record.id],
           };
+        }),
+
+      /**
+       * دفعة واحدة: كل استمارات ساب بتتضاف بتحديث واحد للمخزن.
+       * قبل كده كل استمارة كانت بتنسخ خريطة الحالات كلها — مع ٣٠ استمارة
+       * في الساب ده كان ٣٠ نسخة كاملة من كل الحالات.
+       */
+      upsertCases: (records) =>
+        set((s) => {
+          if (!records.length) return s;
+          const cases = { ...s.cases };
+          let caseOrder = s.caseOrder;
+          const added: string[] = [];
+          for (const record of records) {
+            const prev = cases[record.id];
+            cases[record.id] = mergeCase(prev, record);
+            if (!prev && !caseOrder.includes(record.id)) added.push(record.id);
+          }
+          if (added.length) caseOrder = [...caseOrder, ...added];
+          return { cases, caseOrder };
         }),
 
       patchCase: (id, patch) =>
@@ -288,6 +338,21 @@ export const useAppStore = create<AppState>()(
 
       clearSamples: () => set({ samples: [] }),
 
+      pushSteps: (items) =>
+        set((s) => (items.length ? { steps: [...s.steps, ...items].slice(-2000) } : s)),
+
+      clearSteps: () => set({ steps: [] }),
+
+      setSabCache: (sab, entry) => set((s) => ({ sabCache: { ...s.sabCache, [sab]: entry } })),
+
+      clearSabCache: (day) =>
+        set((s) => {
+          if (!day) return { sabCache: {} };
+          const next: Record<string, SabCacheEntry> = {};
+          for (const [sab, entry] of Object.entries(s.sabCache)) if (entry.day === day) next[sab] = entry;
+          return { sabCache: next };
+        }),
+
       addOutreach: (items) => set((s) => ({ outreach: [...s.outreach, ...items] })),
 
       patchOutreach: (id, patch) =>
@@ -297,7 +362,9 @@ export const useAppStore = create<AppState>()(
 
       setScreen: (screen) => set({ screen }),
 
-      setViewer: (viewerId) => set({ viewerId }),
+      setViewer: (viewerId) => set(viewerId ? { viewerId, lastDecisionId: viewerId } : { viewerId }),
+
+      setLastDecision: (lastDecisionId) => set({ lastDecisionId }),
 
       setLoggedIn: (niceDeerLoggedIn) => set({ niceDeerLoggedIn }),
 
@@ -314,6 +381,9 @@ export const useAppStore = create<AppState>()(
           session: { ...emptySession },
           screen: "setup",
           viewerId: null,
+          lastDecisionId: null,
+          steps: [],
+          sabCache: {},
           niceDeerLoggedIn: false,
         }),
 
@@ -337,6 +407,7 @@ export const useAppStore = create<AppState>()(
         ),
         log: s.log.slice(0, 250),
         samples: s.samples.slice(-150),
+        steps: s.steps.slice(-1200),
         viewerId: null,
       }),
       onRehydrateStorage: () => (state) => {

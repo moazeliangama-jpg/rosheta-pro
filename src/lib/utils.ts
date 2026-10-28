@@ -60,6 +60,26 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+const AR_DIGITS = "٠١٢٣٤٥٦٧٨٩";
+const FA_DIGITS = "۰۱۲۳۴۵۶۷۸۹";
+
+/**
+ * تنظيف رقم الساب: بيشيل المسافات والشرطات والحروف المخفية،
+ * ويحوّل الأرقام العربية/الفارسية لأرقام إنجليزية.
+ * الساب المتسخ كان بيسبب بحث فاضي أو «غير موجود» وهو موجود فعلًا.
+ */
+export function normalizeSab(raw: unknown) {
+  let out = "";
+  for (const ch of String(raw ?? "")) {
+    const ar = AR_DIGITS.indexOf(ch);
+    const fa = FA_DIGITS.indexOf(ch);
+    if (ar >= 0) out += String(ar);
+    else if (fa >= 0) out += String(fa);
+    else if (ch >= "0" && ch <= "9") out += ch;
+  }
+  return out;
+}
+
 export function normalizePhone(raw: string) {
   const digits = String(raw ?? "")
     .replace(/[^\d+]/g, "")
@@ -67,6 +87,8 @@ export function normalizePhone(raw: string) {
   if (!digits) return "";
   if (digits.startsWith("20")) return digits;
   if (digits.startsWith("0")) return `20${digits.slice(1)}`;
+  // رقم محلي بدون صفر (من نايس دير بييجي كده أحيانًا)
+  if (digits.length === 10) return `20${digits}`;
   return digits;
 }
 

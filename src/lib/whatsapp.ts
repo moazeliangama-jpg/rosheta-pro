@@ -1,5 +1,5 @@
 import type { CaseRecord, MonthlyCheck, OutreachMessage, Settings } from "./types";
-import { normalizePhone, uid } from "./utils";
+import { dateKey, normalizePhone, uid } from "./utils";
 
 export type ReplyClass = OutreachMessage["reply"];
 
@@ -145,4 +145,55 @@ export function replyStats(outreach: OutreachMessage[]) {
     postpone: outreach.filter((m) => m.reply === "postpone").length,
     pending: outreach.filter((m) => m.reply === "pending").length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// أمان الإرسال: أرقام سليمة، فاصل عشوائي، وحد يومي
+// ---------------------------------------------------------------------------
+
+/**
+ * ٨٦) تجهيز الرقم قبل الإرسال: +20 والأرقام المحلية والإنجليزية كلها بتتحول
+ * لصيغة واحدة، والرقم الغلط بيتمنع قبل ما يفتح واتساب أصلًا.
+ */
+export function validatePhone(raw: string): { ok: boolean; phone: string; reason: string } {
+  const phone = normalizePhone(raw);
+  if (!phone) return { ok: false, phone: "", reason: "مفيش رقم تليفون" };
+  // رقم مصري دولي: 20 + 10 أرقام
+  if (!/^20\d{10}$/.test(phone)) {
+    return { ok: false, phone, reason: `رقم غير صالح للواتساب (${phone}) — لازم ١١ رقم محلي` };
+  }
+  return { ok: true, phone, reason: "" };
+}
+
+/**
+ * ٨٥) فاصل الإرسال بعشوائية ±: فاصل ثابت تمامًا نمط آلي واضح،
+ * والعشوائية الصغيرة بتقلل خطر الحظر من غير ما تطوّل الجلسة.
+ */
+export function jitteredDelay(sec: number, jitterPct: number, random: () => number = Math.random) {
+  const base = Math.max(1, sec) * 1000;
+  const pct = Math.max(0, Math.min(80, jitterPct)) / 100;
+  const factor = 1 + (random() * 2 - 1) * pct;
+  return Math.max(1000, Math.round(base * factor));
+}
+
+/** ٩٢) عدد الرسائل المُرسلة في يوم معيّن */
+export function sentToday(outreach: OutreachMessage[], day: string) {
+  return outreach.filter((m) => m.status === "sent" && m.at && dateKey(new Date(m.at)) === day).length;
+}
+
+/** الرسائل المسموح إرسالها النهاردة بعد تطبيق الحد اليومي */
+export function selectSendable(
+  outreach: OutreachMessage[],
+  limit: number,
+  day: string,
+): { list: OutreachMessage[]; blocked: number } {
+  const pending = outreach.filter((m) => m.status === "queued" || m.status === "failed");
+  const used = sentToday(outreach, day);
+  const room = Math.max(0, limit - used);
+  return { list: pending.slice(0, room), blocked: Math.max(0, pending.length - room) };
+}
+
+/** ٨٩) الرد اتقرأ قبل كده بنفس النص؟ مش بنعيد تصنيفه ونحدّث الحالة بلا داعي */
+export function isSameReply(m: OutreachMessage, text: string) {
+  return Boolean(m.replyText) && m.replyText === text;
 }
