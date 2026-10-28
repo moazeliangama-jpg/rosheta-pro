@@ -41,6 +41,8 @@ export default function App() {
   // استرجاع الصور + تنقية الحالات + تحديث الصلاحية حسب تاريخ اليوم
   useEffect(() => {
     void hydrateImages();
+    // ٥٤) تنظيف صور أقدم من ٣٠ يوم مرة واحدة عند فتح البرنامج
+    void import("./lib/imageStore").then((m) => m.pruneImages(30));
     const t = setTimeout(() => {
       refreshValidity();
     }, 800);

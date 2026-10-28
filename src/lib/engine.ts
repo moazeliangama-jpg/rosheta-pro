@@ -881,15 +881,25 @@ export class SessionEngine {
       void b.busy(false);
       // تصدير تقرير الجلسة تلقائيًا (اختياري من الإعدادات)
       if (this.settings().autoExport) {
-        void import("./excel").then((x) =>
+        const st = useAppStore.getState();
+        void import("./excel").then((x) => {
           x.exportSessionReport({
-            cases: Object.values(useAppStore.getState().cases),
-            failed: useAppStore.getState().failed,
-            samples: useAppStore.getState().samples,
+            cases: Object.values(st.cases),
+            failed: st.failed,
+            samples: st.samples,
             sessionMs: Date.now() - this.startedAt,
-            steps: Object.values(useAppStore.getState().steps ?? []),
-          }),
-        );
+            steps: st.steps,
+          });
+          // ٩١) إكسل المتعثرين بيتولد لوحده لو فيه تعثرات
+          if (st.failed.length) {
+            x.exportFailed(st.failed, {
+              "مدة التشغيل": `${Math.round((Date.now() - this.startedAt) / 60000)} دقيقة`,
+              "عدد الاستمارات": Object.keys(st.cases).length,
+              "صور جاهزة": this.images,
+              "متعثرة": this.failures,
+            });
+          }
+        });
       }
     }
 
