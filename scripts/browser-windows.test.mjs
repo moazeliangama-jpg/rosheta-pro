@@ -114,3 +114,31 @@ test("لا حذف لأي استمارة من غير ما البرنامج نفس
   assert.match(main, /cancelPendingDeletes\(/, "إلغاء المستخدم لازم يلغي الإرجاعات المعلّقة");
   assert.match(engine, /cancelDeletes\(\{ reason: "المستخدم أوقف التشغيل" \}\)/, "زر الإيقاف لازم يلغي الإرجاعات");
 });
+
+test("صورة الروشتة بتتجاب من نفس جلسة النافذة (مش جلسة تانية)", () => {
+  // النافذة المنبثقة للروشتة لازم تورث partition النافذة اللي فتحتها
+  const arm = main.slice(main.indexOf("function armPopupCapture"));
+  const popup = arm.slice(0, arm.indexOf("const grab ="));
+  assert.match(popup, /webPreferences\.partition = win\.__rpPartition \|\| ND_PARTITION/, "النافذة المنبثقة لازم تورث جلسة النافذة");
+  assert.doesNotMatch(popup, /overrideBrowserWindowOptions: hiddenWindowOptions\(\{ show: false \}\)\s*,?\s*\n\s*\}\s*;/, "ممنوع ترجع للجلسة المشتركة");
+
+  // جلب الصورة من الشبكة بنفس جلسة النافذة
+  const fetchSource = main.slice(main.indexOf("async function fetchSource"));
+  const fetchBody = fetchSource.slice(0, fetchSource.indexOf("async function fetchImageViaSession"));
+  assert.match(fetchBody, /wc\(win\)\?\.session/, "جلب الشبكة لازم يستخدم جلسة النافذة نفسها");
+  assert.doesNotMatch(fetchBody, /const ses = session\.fromPartition\(ND_PARTITION\);/, "جلسة الدخول المشتركة مش صالحة لجلب صورة ساب");
+
+  // فتح رابط الروشتة: بنفس الـpartition بتاع النافذة المصدر
+  const cap = main.slice(main.indexOf("async function captureFromUrl"));
+  const capBody = cap.slice(0, cap.indexOf("// الاستمارة الواحدة"));
+  assert.match(capBody, /sourceWin\.__rpPartition/, "رابط الروشتة بيتفتح بجلسة النافذة المصدر");
+  assert.match(capBody, /fetchImageViaSession\(sourceWin/, "أول محاولة: جلب بنفس الجلسة قبل فتح أي نافذة");
+  assert.match(main, /captureFromUrl\(abs, wc\(win\)\.getURL\(\), ref, win\)/, "لازم تمرير النافذة المصدر");
+});
+
+test("فشل صورة الروشتة بيرجّع دليل مكتوب (صفحة + لقطة)", () => {
+  const start = main.indexOf("async function processForm(");
+  const body = main.slice(start, main.indexOf("async function ", start + 10));
+  assert.match(body, /saveWindowEvidence\(win, `image-/, "فشل الصورة لازم يحفظ دليل");
+  assert.match(body, /الدليل: \$\{Object\.values\(evidence\)/, "مسار الدليل لازم يظهر في رسالة الفشل");
+});
