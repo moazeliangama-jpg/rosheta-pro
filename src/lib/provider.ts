@@ -127,6 +127,10 @@ export interface RoshettaBridge {
   setWindowMode: (p: { background: boolean }) => Promise<BridgeResult<{ background: boolean }>>;
   /** آخر خطوات محاولة الدخول (تشخيص) */
   loginTrace: () => Promise<BridgeResult<{ trace: string[] }>>;
+  /** «شوف النوافذ» — تعرض نوافذ الأتمتة فوق الشاشة أو ترجّعها للخلفية */
+  watchWindows: (p: { on: boolean }) => Promise<BridgeResult<{ on: boolean; windows: number }>>;
+  /** خطوات حقيقية من نوافذ نايس دير أثناء الشغل — بترجّع دالة إلغاء الاشتراك */
+  onStep: (cb: (line: { at: number; message: string; ref?: string }) => void) => () => void;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
   searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<
     BridgeResult<NdSearchResult> & { ms?: number }

@@ -11,6 +11,7 @@ import type {
   SessionMeta,
   Settings,
   SpeedSample,
+  LiveLine,
   StepSample,
   Verdict,
   HourStat,
@@ -97,6 +98,8 @@ export interface AppState {
   samples: SpeedSample[];
   /** قياس كل خطوة — أساس تقرير السرعة وتحديد الاختناق */
   steps: StepSample[];
+  /** أحداث مباشرة من نوافذ نايس دير (مش بتتحفظ — للعرض الحي بس) */
+  live: LiveLine[];
   /** كاش جرد اليوم: ساب اتجرد النهاردة مش بيتجرد تاني */
   sabCache: Record<string, SabCacheEntry>;
   /** أول يوم ظهرت فيه كل استمارة — أساس جلسة «الجديد فقط» */
@@ -149,6 +152,9 @@ export interface AppState {
   clearSamples: () => void;
   pushSteps: (items: StepSample[]) => void;
   clearSteps: () => void;
+  /** بيضيف سطر للعرض الحي (بيمنع تكرار متتابع لنفس السطر) */
+  pushLive: (line: LiveLine) => void;
+  clearLive: () => void;
   setSabCache: (sab: string, entry: SabCacheEntry) => void;
   clearSabCache: (day?: string) => void;
   addOutreach: (items: OutreachMessage[]) => void;
@@ -328,6 +334,7 @@ export const useAppStore = create<AppState>()(
       session: emptySession,
       samples: [],
       steps: [],
+    live: [],
       sabCache: {},
       seenForms: {},
       hourly: {},
@@ -591,6 +598,18 @@ export const useAppStore = create<AppState>()(
 
       clearSteps: () => set({ steps: [] }),
 
+      pushLive: (line) =>
+        set((s) => {
+          const last = s.live[s.live.length - 1];
+          // نفس الرسالة خلال ثانية ونص = حدث واحد مش ٥٠ سطر
+          if (last && last.message === line.message && last.ref === line.ref && Math.abs(line.at - last.at) < 1500) {
+            return s;
+          }
+          return { live: [...s.live, line].slice(-200) };
+        }),
+
+      clearLive: () => set({ live: [] }),
+
       setSabCache: (sab, entry) => set((s) => ({ sabCache: { ...s.sabCache, [sab]: entry } })),
 
       clearSabCache: (day) =>
@@ -631,6 +650,7 @@ export const useAppStore = create<AppState>()(
           viewerId: null,
           lastDecisionId: null,
           steps: [],
+          live: [],
           sabCache: {},
           seenForms: {},
           hourly: {},

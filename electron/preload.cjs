@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.6",
+  version: "1.0.7",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
@@ -18,6 +18,23 @@ contextBridge.exposeInMainWorld("roshetta", {
   setWindowMode: (payload) => ipcRenderer.invoke("nd:set-window-mode", payload),
   /** آخر خطوات محاولة الدخول — بتظهر في الإعدادات */
   loginTrace: () => ipcRenderer.invoke("nd:login-trace"),
+  /** «شوف النوافذ»: بتطلّع نوافذ الأتمتة قدام المستخدم أو ترجّعها للخلفية */
+  watchWindows: (payload) => ipcRenderer.invoke("nd:watch-windows", payload),
+  /**
+   * الأحداث المباشرة من نوافذ نايس دير (خطوات حقيقية + رسائل الموقع).
+   * بترجّع دالة تفصل الاشتراك.
+   */
+  onStep: (cb) => {
+    const handler = (_e, line) => {
+      try {
+        cb(line);
+      } catch {
+        /* الواجهة مش مسؤولة */
+      }
+    };
+    ipcRenderer.on("nd:step", handler);
+    return () => ipcRenderer.removeListener("nd:step", handler);
+  },
   status: () => ipcRenderer.invoke("nd:status"),
   searchSub: (payload) => ipcRenderer.invoke("nd:search", payload),
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),

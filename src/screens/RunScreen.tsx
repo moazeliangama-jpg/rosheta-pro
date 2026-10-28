@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -7,6 +7,7 @@ import {
   Gauge,
   ImageDown,
   ListChecks,
+  Monitor,
   Pause,
   Play,
   Search,
@@ -14,6 +15,7 @@ import {
   Timer,
 } from "lucide-react";
 import { useAppStore } from "../lib/store";
+import { bridge } from "../lib/provider";
 import { progressSummary } from "../lib/eligibility";
 import { SpeedPanel } from "../components/SpeedPanel";
 import { groupFailures } from "../lib/failures";
@@ -41,7 +43,16 @@ export function RunScreen({
   const log = useAppStore((s) => s.log);
   const failed = useAppStore((s) => s.failed);
 
+  const live = useAppStore((s) => s.live);
+  const [watch, setWatch] = useState(false);
+  const liveRef = useRef<HTMLDivElement | null>(null);
   const [now, setNow] = useState(Date.now());
+
+  // بيتابع آخر سطر تلقائيًا
+  useEffect(() => {
+    const box = liveRef.current;
+    if (box) box.scrollTop = box.scrollHeight;
+  }, [live.length]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -105,6 +116,17 @@ export function RunScreen({
                 <Square className="h-4 w-4" /> إيقاف
               </Button>
             ) : null}
+            <Button
+              variant="ghost"
+              title="بيطلّع نوافذ نايس دير الحقيقية فوق الشاشة عشان تشوف الخطوات وهي بتتنفذ"
+              onClick={async () => {
+                const next = !watch;
+                const res = await bridge()?.watchWindows({ on: next });
+                if (res?.ok) setWatch(next);
+              }}
+            >
+              <Monitor className="h-4 w-4" /> {watch ? "رجّع النوافذ للخلفية" : "شوف النوافذ"}
+            </Button>
             <Button variant="success" onClick={onDecision}>
               <ListChecks className="h-4 w-4" /> شاشة القرار
             </Button>
@@ -158,6 +180,25 @@ export function RunScreen({
           <Badge tone={stats.failed ? "bad" : "ok"}>متعثرة: {stats.failed}</Badge>
         </div>
       </Card>
+
+      {/* الأحداث المباشرة: اللي بيحصل فعلًا جوه نوافذ نايس دير */}
+      {live.length ? (
+        <Card>
+          <SectionTitle hint={`${live.length} حدث — من نوافذ نايس دير نفسها`}>خطوات النوافذ مباشرة</SectionTitle>
+          <div
+            ref={liveRef}
+            className="max-h-56 overflow-auto rounded-xl border border-white/10 bg-black/40 p-2 font-mono text-[11px] leading-relaxed text-white/60"
+            dir="rtl"
+          >
+            {live.slice(-60).map((line, i) => (
+              <div key={`${line.at}-${i}`} className="flex gap-2 whitespace-pre-wrap">
+                <span className="shrink-0 text-white/25">{new Date(line.at).toLocaleTimeString("ar-EG")}</span>
+                <span className="min-w-0 flex-1">{line.message}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      ) : null}
 
       {stats.failed > 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3">
