@@ -10,6 +10,8 @@ const scripts = {
   captureImageScript: S.captureImageScript({}),
   CLOSE_MODAL_SCRIPT: S.CLOSE_MODAL_SCRIPT,
   PAGE_STATE_SCRIPT: S.PAGE_STATE_SCRIPT,
+  LOGIN_PROBE_SCRIPT: S.LOGIN_PROBE_SCRIPT,
+  FETCH_IN_PAGE_SCRIPT: S.FETCH_IN_PAGE_SCRIPT("https://nicedeer.net/x.jpg"),
   HAS_DELETE_SCRIPT: S.HAS_DELETE_SCRIPT,
   PARSE_RESULTS_SCRIPT: S.PARSE_RESULTS_SCRIPT,
   FIND_IMAGE_LINK_SCRIPT: S.FIND_IMAGE_LINK_SCRIPT,
@@ -57,8 +59,28 @@ for (const [label, selectors] of Object.entries(required)) {
   }
 }
 
+// الأسلاك الحرجة: التشخيص والالتقاط لازم يكونوا موصولين فعلاً في main.cjs
+const wiring = {
+  "تصنيف صفحة الدخول": ["RX.classifyLoginPage", "LOGIN_PROBE_SCRIPT", "waitLoginState"],
+  "تأكيد الدخول بصفحة البحث": ["verifySessionBySearchPage"],
+  "التقاط من الفريمات/الكانفس": ["toDataURL", "contentDocument", "canvas"],
+  "احتياطي الشبكة": ["fetchImageViaSession", "FETCH_IN_PAGE_SCRIPT", "session.fromPartition"],
+  "لقطة شاشة مش فاضية": ["RX.isLikelyBlankShot", "capturePage"],
+  "النافذة المفتوحة مسبقًا": ["adoptExisting", "did-create-window"],
+  "سجل الالتقاط": ["capLog", "capture.log"],
+};
+for (const [label, tokens] of Object.entries(wiring)) {
+  const missing = tokens.filter((t) => !all.includes(t));
+  if (missing.length) {
+    console.error(`❌ ${label}: ناقص (${missing.join(", ")})`);
+    bad += 1;
+  } else {
+    console.log(`✅ ${label}`);
+  }
+}
+
 if (bad) {
-  console.error(`\nفشل ${bad} سكربت`);
+  console.error(`\nفشل ${bad} عنصر`);
   process.exit(1);
 }
 console.log("\nكل السكربتات سليمة ✨");

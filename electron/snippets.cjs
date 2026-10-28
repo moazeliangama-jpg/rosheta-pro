@@ -299,43 +299,93 @@ const clickReferenceScript = (reference) => `(() => {
 const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 1600, quality = 0.84 } = {}) => `(async () => {
   ${HELPERS}
 
-  // أكبر صورة بدون sort: لفة واحدة على document.images في كل frame
-  const pickLargest = () => {
+  const MIN = ${Number(minSide)};
+  const t0 = performance.now();
+
+  // بنلم الصور من الصفحة الرئيسية + أي iframe من نفس الأصل (صفحة الروشتة
+  // ممكن تحط الصورة جوه فريم أو viewer)، وأي canvas كبير.
+  const collect = () => {
+    const images = [];
+    const canvases = [];
+    let frames = 0;
+    let embeds = 0;
+    const walk = (doc, depth) => {
+      if (!doc || depth > 2) return;
+      for (const img of doc.images || []) {
+        images.push({ kind: 'img', el: img, w: img.naturalWidth || 0, h: img.naturalHeight || 0 });
+      }
+      for (const c of doc.querySelectorAll('canvas')) {
+        if ((c.width || 0) >= MIN && (c.height || 0) >= MIN) canvases.push({ kind: 'canvas', el: c, w: c.width, h: c.height });
+      }
+      for (const e of doc.querySelectorAll('embed, object')) embeds += 1;
+      for (const f of doc.querySelectorAll('iframe')) {
+        frames += 1;
+        try {
+          if (f.contentDocument) walk(f.contentDocument, depth + 1);
+        } catch (e) { /* فريم من أصل تاني — مقدرناش ندخل */ }
+      }
+    };
+    walk(document, 0);
+    return { images, canvases, frames, embeds };
+  };
+
+  const pickBest = () => {
+    const found = collect();
     let best = null;
     let bestArea = 0;
-    for (const img of document.images) {
-      const w = img.naturalWidth || 0;
-      const h = img.naturalHeight || 0;
-      if (w < ${Number(minSide)} || h < ${Number(minSide)}) continue;
-      if (!img.complete) continue;
-      const area = w * h;
+    for (const item of [...found.images, ...found.canvases]) {
+      if (item.w < MIN || item.h < MIN) continue;
+      if (item.kind === 'img' && !item.el.complete) continue;
+      const area = item.w * item.h;
       if (area > bestArea) {
         bestArea = area;
-        best = img;
+        best = item;
       }
     }
     return best;
   };
 
-  const t0 = performance.now();
-  const img = await rpWait(pickLargest, ${Number(timeoutMs)});
+  const best = await rpWait(pickBest, ${Number(timeoutMs)});
 
-  // انتظار فك الترميز الفعلي بدل sleep عشوائي
-  if (img) {
+  if (best && best.kind === 'img') {
     try {
-      if (img.decode) await img.decode();
-    } catch (e) { /* مفيش فك ترميز — بنكمل بالصورة المحمّلة */ }
+      if (best.el.decode) await best.el.decode();
+    } catch (e) { /* بنكمل بالصورة المحمّلة */ }
   }
 
-  if (!img) {
-    const anyImg = [...document.images].some((i) => (i.naturalWidth || 0) > 40);
-    return { failed: true, reason: anyImg ? 'small-or-loading' : 'no-image', ms: Math.round(performance.now() - t0) };
+  const snapshot = collect();
+  const diag = {
+    images: snapshot.images.length,
+    frames: snapshot.frames,
+    canvases: snapshot.canvases.length,
+    embeds: snapshot.embeds,
+    maxW: Math.max(0, ...snapshot.images.map((i) => i.w)),
+    maxH: Math.max(0, ...snapshot.images.map((i) => i.h)),
+    minSide: MIN,
+    url: location.href,
+    title: document.title,
+  };
+
+  if (!best) {
+    return { failed: true, reason: snapshot.images.length || snapshot.canvases.length ? 'small-or-loading' : 'no-image', diag, ms: Math.round(performance.now() - t0) };
   }
 
-  const src = img.currentSrc || img.src;
-  const size = { width: img.naturalWidth, height: img.naturalHeight };
+  const size = { width: best.w, height: best.h };
 
-  // 1) canvas — بنعيد الترميز JPEG بجودة عالية: أوضح من كفاية وأسرع بكتير في النقل
+  // 1) canvas مباشرة
+  if (best.kind === 'canvas') {
+    try {
+      const dataUrl = best.el.toDataURL('image/jpeg', ${Number(quality)});
+      if (dataUrl && dataUrl.length > 2000) {
+        return { ...size, dataUrl, method: 'canvas-element', diag, ms: Math.round(performance.now() - t0) };
+      }
+    } catch (e) { /* الكانفس محمي */ }
+  }
+
+  const img = best.el;
+  const src = (img.currentSrc || img.src || '').toString();
+
+  // 2) إعادة رسم على canvas — أوضح وأصغر من الصورة الأصلية
   try {
     const maxW = ${Number(maxWidth)};
     const scale = img.naturalWidth > maxW ? maxW / img.naturalWidth : 1;
@@ -355,29 +405,32 @@ const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 1600,
         dataUrl,
         src,
         method: scale < 1 ? 'canvas-jpeg-scaled' : 'canvas-jpeg',
+        diag,
         ms: Math.round(performance.now() - t0),
       };
     }
   } catch (e) { /* الصورة محمية (tainted) */ }
 
-  // 2) fetch بنفس الكوكيز
-  try {
-    const res = await fetch(src, { credentials: 'include' });
-    if (res.ok) {
-      const blob = await res.blob();
-      if (blob && blob.size > 1500) {
-        const dataUrl = await new Promise((resolve) => {
-          const fr = new FileReader();
-          fr.onload = () => resolve(String(fr.result));
-          fr.onerror = () => resolve(null);
-          fr.readAsDataURL(blob);
-        });
-        if (dataUrl) return { ...size, dataUrl, src, method: 'fetch', ms: Math.round(performance.now() - t0) };
+  // 3) fetch بنفس الكوكيز
+  if (src) {
+    try {
+      const res = await fetch(src, { credentials: 'include' });
+      if (res.ok) {
+        const blob = await res.blob();
+        if (blob && blob.size > 1500) {
+          const dataUrl = await new Promise((resolve) => {
+            const fr = new FileReader();
+            fr.onload = () => resolve(String(fr.result));
+            fr.onerror = () => resolve(null);
+            fr.readAsDataURL(blob);
+          });
+          if (dataUrl) return { ...size, dataUrl, src, method: 'fetch', diag, ms: Math.round(performance.now() - t0) };
+        }
       }
-    }
-  } catch (e) { /* تجاهل */ }
+    } catch (e) { /* تجاهل */ }
+  }
 
-  // 3) خلفية العنصر
+  // 4) خلفية العنصر
   try {
     const bg = getComputedStyle(img).backgroundImage;
     if (bg && bg.startsWith('url(')) {
@@ -388,14 +441,20 @@ const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 1600,
         const dataUrl = await new Promise((resolve) => {
           const fr = new FileReader();
           fr.onload = () => resolve(String(fr.result));
+          fr.onerror = () => resolve(null);
           fr.readAsDataURL(blob);
         });
-        if (dataUrl) return { ...size, dataUrl, src: bgUrl, method: 'background', ms: Math.round(performance.now() - t0) };
+        if (dataUrl) return { ...size, dataUrl, src: bgUrl, method: 'background', diag, ms: Math.round(performance.now() - t0) };
       }
     }
   } catch (e) { /* تجاهل */ }
 
-  return { failed: true, reason: 'protected', src, ...size, ms: Math.round(performance.now() - t0) };
+  // 5) الصفحة فيها PDF مدمج؟ (مفيش <img> نلقطه — محتاجين لقطة شاشة)
+  if (!src && diag.embeds > 0) {
+    return { failed: true, reason: 'pdf-embed', diag, ms: Math.round(performance.now() - t0) };
+  }
+
+  return { failed: true, reason: 'protected', src, ...size, diag, ms: Math.round(performance.now() - t0) };
 })()`;
 
 // ---------------------------------------------------------------------------
@@ -462,6 +521,83 @@ const SESSION_CHECK_SCRIPT = `(() => {
   const body = (document.body && document.body.innerText) || '';
   if (/تسجيل الدخول|Sign in|Login/i.test(body.slice(0, 400)) && !document.querySelector('#Table, #Table2')) return 'logged-out';
   return 'unknown';
+})()`;
+
+/**
+ * جلب رابط **جوه الصفحة نفسها** — نفس الأصل يعني نفس الكوكيز والـreferer
+ * ومن غير مشاكل CORS اللي بتضيّع الصورة لما تكون محمية.
+ * بيرجّع الصورة كـdataURL، أو نص HTML لو الرابط صفحة مش صورة.
+ */
+const FETCH_IN_PAGE_SCRIPT = (url, { maxBytes = 8000000 } = {}) => `(async () => {
+  ${HELPERS}
+  const MAX = ${Number(maxBytes)};
+  const target = ${JSON.stringify(String(url))};
+  let res;
+  try {
+    res = await fetch(target, { credentials: 'include', cache: 'no-store' });
+  } catch (e) {
+    return { failed: true, reason: 'cors-or-network', message: String(e && e.message || e) };
+  }
+  const type = (res.headers.get('content-type') || '').toLowerCase();
+  if (!res.ok) {
+    // بعض السيرفرات بترفض fetch من غير referer — بنجرب XHR ملوش داعي، بنرجّع السبب
+    return { failed: true, reason: 'http-' + res.status, type, status: res.status };
+  }
+  let blob;
+  try {
+    blob = await res.blob();
+  } catch (e) {
+    return { failed: true, reason: 'read-failed', type };
+  }
+  if (!blob || !blob.size) return { failed: true, reason: 'empty', type };
+  if (blob.size > MAX) return { failed: true, reason: 'too-large', type, size: blob.size };
+
+  if (!/^image[\/]/.test(type)) {
+    let text = '';
+    try { text = await blob.text(); } catch (e) { text = ''; }
+    return { type, size: blob.size, text: text.slice(0, 400000) };
+  }
+
+  const dataUrl = await new Promise((resolve) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result || ''));
+    fr.onerror = () => resolve('');
+    fr.readAsDataURL(blob);
+  });
+  if (!dataUrl || dataUrl.length < 200) return { failed: true, reason: 'decode-failed', type, size: blob.size };
+  return { type, size: blob.size, dataUrl };
+})()`;
+
+/**
+ * تشخيص صفحة الدخول: إيه اللي ظاهر فعلاً (فورم / داخل / تحقق بشري / رسالة رفض).
+ * بيرجّع بيانات خام، والتصنيف بيحصل في rx-page.cjs عشان يبقى متاختبر.
+ */
+const LOGIN_PROBE_SCRIPT = `(() => {
+  const txt = (sel) => {
+    const el = document.querySelector(sel);
+    return el ? (el.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  };
+  const errors = ['.validation-summary-errors', '.alert-danger', '.text-danger', '.field-validation-error', '.validation-message', '#loginError', '.toast-error']
+    .map(txt)
+    .filter((t) => t.length > 2);
+  let body = '';
+  try { body = (document.body && document.body.innerText) || ''; } catch (e) { body = ''; }
+  const head = (document.title || '') + ' ' + body.slice(0, 400);
+  const challenge = Boolean(
+    document.querySelector('#challenge-form, #cf-challenge-running, .cf-turnstile, iframe[src*="challenge"], #challenge-stage, #captcha') ||
+    /just a moment|checking your browser|verify you are human|attention required|please wait\.\.\./i.test(head)
+  );
+  return {
+    url: location.href,
+    title: document.title || '',
+    hasUser: Boolean(document.querySelector('#UserName')),
+    hasPass: Boolean(document.querySelector('#passwordInput')),
+    hasBtn: Boolean(document.querySelector('#loginBTN')),
+    hasCode: Boolean(document.querySelector('#SearchCode')),
+    errorText: errors.join(' | '),
+    challenge,
+    bodySnippet: body.replace(/\s+/g, ' ').trim().slice(0, 300),
+  };
 })()`;
 
 /** نتيجة الإرجاع: هل الزرار اختفى/ظهرت رسالة نجاح بعد الضغط؟ */
@@ -578,6 +714,8 @@ module.exports = {
   HAS_DELETE_SCRIPT,
   WAIT_AJAX_IDLE_SCRIPT,
   SESSION_CHECK_SCRIPT,
+  LOGIN_PROBE_SCRIPT,
+  FETCH_IN_PAGE_SCRIPT,
   PROBE_SELECTORS_SCRIPT,
   DELETE_OUTCOME_SCRIPT,
   CLOSE_MODAL_SCRIPT,
