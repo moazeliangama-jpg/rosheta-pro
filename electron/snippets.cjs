@@ -43,13 +43,41 @@ const HELPERS = `
 // ---------------------------------------------------------------------------
 const PARSE_FN_SRC = `
   const rpClean = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+
+  /**
+   * كل صفوف الجدول — **مش بس الصفحة الظاهرة**.
+   *
+   * جداول نايس دير DataTables، ولو الساب عنده أكتر من صفحة استمارات كان
+   * الجرد بيقرا الصفوف المعروضة بس (١٠ صفوف) — يعني عدد استمارات ناقص من
+   * غير أي رسالة خطأ. هنا بنطلب كل الصفوف من الـAPI نفسه.
+   */
+  const rpRows = (table) => {
+    if (!table) return [];
+    try {
+      const jq = window.jQuery;
+      if (jq && jq.fn && jq.fn.dataTable && jq.fn.dataTable.isDataTable) {
+        const sel = table.id ? '#' + table.id : null;
+        if (sel && jq.fn.dataTable.isDataTable(sel)) {
+          const dt = jq(sel).DataTable();
+          // عرض كل الصفوف (لو الجدول مقسّم صفحات على العميل) وبعدها نقرا الكل
+          try { dt.page.len(-1).draw(false); } catch (e) { /* مش مشكلة */ }
+          let nodes = [];
+          try { nodes = [...dt.rows({ search: 'applied' }).nodes()]; } catch (e) { nodes = []; }
+          const trs = nodes.filter((n) => n && n.tagName === 'TR');
+          if (trs.length) return trs;
+        }
+      }
+    } catch (e) { /* نكمل بالـDOM */ }
+    return [...table.querySelectorAll('tbody tr')];
+  };
+
   const rpParse = () => {
     const forms = [];
 
     // جدول 1: Pre-Approvals
     const t1 = document.querySelector('#Table');
     if (t1) {
-      for (const tr of t1.querySelectorAll('tbody tr')) {
+      for (const tr of rpRows(t1)) {
         const hidden = tr.querySelector('input[name="approval.PreApprovalId"]');
         const link = tr.querySelector('a.hyperLink');
         if (!link && !hidden) continue;
@@ -78,7 +106,7 @@ const PARSE_FN_SRC = `
     // جدول 2: Claims
     const t2 = document.querySelector('#Table2');
     if (t2) {
-      for (const tr of t2.querySelectorAll('tbody tr')) {
+      for (const tr of rpRows(t2)) {
         const link = tr.querySelector('a.hyperLink');
         if (!link) continue;
         const cells = [...tr.querySelectorAll('td')].map((td) => rpClean(td.textContent));

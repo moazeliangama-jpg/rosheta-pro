@@ -155,3 +155,14 @@ test("النافذة على أي صفحة نايس دير من غير SearchCode
   const loginAt = body.indexOf("loginIntoIsolatedWindow");
   assert.ok(loginAt > loadAt, "الدخول لازم يبقى بعد محاولة فتح صفحة البحث");
 });
+
+test("الجرد بيقرا كل صفوف الجدولين (مش أول صفحة بس)", () => {
+  const snippets = read("electron/snippets.cjs");
+  const start = snippets.indexOf("const PARSE_FN_SRC");
+  const body = snippets.slice(start, snippets.indexOf("const PARSE_RESULTS_SCRIPT", start));
+  assert.match(body, /const rpRows = \(table\)/, "لازم قارئ صفوف موحّد");
+  assert.match(body, /page\.len\(-1\)/, "لازم عرض كل الصفوف قبل القراءة (DataTables بيفصّل صفحات)");
+  assert.match(body, /rows\(\{ search: 'applied' \}\)\.nodes\(\)/, "القراءة من DataTables API بتشمل كل الصفحات");
+  assert.match(body, /for \(const tr of rpRows\(t1\)\)/, "جدول Pre-Approvals بيستخدم قارئ كل الصفوف");
+  assert.match(body, /for \(const tr of rpRows\(t2\)\)/, "جدول Claims بيستخدم قارئ كل الصفوف");
+});
