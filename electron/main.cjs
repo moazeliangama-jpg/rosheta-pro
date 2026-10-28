@@ -581,6 +581,18 @@ function hiddenWindowOptions(extra = {}) {
     // نافذة أصغر = ذاكرة ورسم أقل، ومفيش أي تأثير على قراءة الصفحة
     width: 1000,
     height: 700,
+    // **نافذة متصفح حقيقية**: إطار ويندوز عادي + شريط مهام + عنوان بيتغيّر مع
+    // الخطوة الجارية. الإخفاء التام (show:false نهائي) كان بيكسر نايس دير/كلاودفلير
+    // وبيطلّع صور فاضية، فالنافذة بتتعرض فورًا بـshowInactive (من غير سرقة تركيز).
+    frame: true,
+    titleBarStyle: "default",
+    autoHideMenuBar: true,
+    backgroundColor: "#ffffff",
+    minimizable: true,
+    maximizable: true,
+    closable: true,
+    skipTaskbar: false,
+    title: "روشتة برو — نايس دير",
     webPreferences: {
       partition: ND_PARTITION,
       backgroundThrottling: false,
@@ -631,11 +643,26 @@ function presentInBackground(win, index = 0) {
   }
   try {
     win.setBounds(backgroundBounds(index));
-    win.setSkipTaskbar(true);
-    // showInactive: بتترسم وبتتحسب «مرئية» عند الموقع، بس مش بتسحب التركيز من البرنامج
+    // نافذة حقيقية في شريط المهام: تقدر تشوفها وتدوس عليها في أي وقت.
+    // مفيش سرقة تركيز لأن الظهور بـshowInactive مش بـshow.
+    win.setSkipTaskbar(false);
     win.showInactive();
   } catch {
     /* لو مش قادر يعرضها، بنكمل */
+  }
+}
+
+/**
+ * عنوان النافذة = اللي بيتعمل فيها دلوقتي بالظبط. النافذة الحقيقية بتتعرف
+ * من شريط المهام، فالعنوان هو اللي بيقول للمستخدم: النافذة دي على ساب إيه.
+ */
+function labelWindow(win, text) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    const title = String(text || "").trim();
+    win.setTitle(title ? `روشتة برو — ${title}` : "روشتة برو — نايس دير");
+  } catch {
+    /* تجاهل */
   }
 }
 
@@ -716,6 +743,7 @@ class WindowPool {
     win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
     win.__rpOps = 0;
     setResourceMode(win, this.blockImages ? "search" : "images");
+    labelWindow(win, `نافذة ${this.name} #${this.windows.length + 1}`);
     // النافذة بتظهر في الخلفية (مرئية للموقع) — ده اللي بيخلي الدخول والتحقق يشتغلوا
     presentInBackground(win, this.windows.length);
     // منع تحويل أي نافذة لصفحة غير متوقعة (بيحصل مع redirects لصفحة الدخول)
@@ -881,11 +909,42 @@ const deleters = new WindowPool({ name: "deleters", max: MAX_DELETERS, keepState
 /** إعادات الإرجاع — بنعيد الفاشل مرة واحدة بس في آخر الجلسة */
 const deleteRetry = new Map();
 
+/**
+ * «عصر» الإرجاع: لو المستخدم لغى العملية، العصر بيتغيّر وكل مهمة اتظبطت في
+ * العصر القديم بتتجاهل قبل ما تلمس الموقع. ده اللي بيضمن إن **الإلغاء = مفيش حذف**. 
+ */
+let deleteEpoch = 0;
+
 function enqueueDelete(job) {
-  deleteResults.set(job.key, { state: "queued", at: Date.now() });
-  deleteJobs.push(job);
+  const entry = { ...job, epoch: deleteEpoch };
+  deleteResults.set(entry.key, { state: "queued", at: Date.now() });
+  deleteJobs.push(entry);
   pumpDeletes();
   return deleteJobs.length;
+}
+
+/**
+ * إلغاء الإرجاعات: بنفرّغ الطابور وبنلغي كل مهمة لسه ما اتنفذتش، واللي شغالة
+ * بترجع "cancelled" قبل أي ضغطة على #btn-DeleteClaim.
+ * السبب واضح في النتيجة عشان المستخدم يعرف إن مفيش حذف حصل فعلًا.
+ */
+function cancelPendingDeletes(reason = "المستخدم لغى العملية") {
+  deleteEpoch += 1;
+  const queued = deleteJobs.splice(0, deleteJobs.length);
+  for (const job of queued) {
+    deleteResults.set(job.key, { state: "cancelled", at: Date.now(), reason });
+  }
+  let retried = 0;
+  for (const [key, job] of [...deleteRetry.entries()]) {
+    const prev = deleteResults.get(key);
+    if (prev && (prev.state === "done" || prev.state === "confirmed")) continue;
+    deleteResults.set(key, { state: "cancelled", at: Date.now(), reason });
+    deleteRetry.delete(key);
+    retried += 1;
+  }
+  const total = queued.length + retried;
+  if (total) liveStep(`اتلغى ${total} إرجاع — مفيش حذف لأن العملية اتلغت`);
+  return { cancelled: total, running: deleteRunning };
 }
 
 function deleteBacklog() {
@@ -905,6 +964,11 @@ function pumpDeletes() {
 
 async function runDeleteJob(job) {
   const started = Date.now();
+  // اتلغى قبل ما يبدأ أو وهو في الطابور → مفيش أي لمس للموقع
+  if (job.epoch !== deleteEpoch) {
+    deleteResults.set(job.key, { state: "cancelled", at: Date.now(), reason: "المستخدم لغى العملية" });
+    return;
+  }
   try {
     // نفس الساب على نفس النافذة (الكوكيز والجلسة موجودة) — أسرع وبيمنع قفز الحالة
     const state = await deleters.withPref(
@@ -913,10 +977,13 @@ async function runDeleteJob(job) {
         win.__rpSab = job.sab;
         // صفحة الإرجاع مش محتاجة صور — بنمنعها لتسريع التحميل
         setResourceMode(win, "search");
+        labelWindow(win, `ساب ${job.sab} — إرجاع ${job.reference}`);
         for (const candidate of job.candidates) {
           if (!candidate || candidate === "main") continue;
           const loaded = await safeLoad(win, candidate, TIMEOUTS.delete);
           if (loaded === "error") continue;
+          // الإلغاء ممكن يحصل والصفحة لسه بتفتح — بنحترمه قبل أي ضغطة
+          if (job.epoch !== deleteEpoch) return "cancelled";
           const hasButton = await run(win, S.waitForSelectorScript("#btn-DeleteClaim", 3500));
           if (!hasButton) continue;
           const click = await run(win, S.CLICK_DELETE_SCRIPT);
@@ -1456,6 +1523,8 @@ async function searchSub(win, { sab, payerId, payerName, timeoutMs }) {
 
   win.__rpSab = sab;
   win.__rpRefs = forms.map((f) => f.reference);
+  // عنوان النافذة الحقيقية = الساب اللي بتشتغل عليه دلوقتي
+  labelWindow(win, `ساب ${cleanSab} — ${forms.length} استمارة`);
 
   return {
     sab,
@@ -1890,8 +1959,16 @@ async function processForm(win, job) {
   // صفحة الروشتة محتاجة صور — نسمح بيها في النافذة دي بس
   setResourceMode(win, "images");
   const ref = `${sab}::${reference}`;
+  labelWindow(win, `ساب ${sab} — صورة ${reference}`);
   const popup = armPopupCapture(win, ref);
   const tried = [];
+  /**
+   * هل إحنا اللي فتحنا الروشتة عشان ناخد الصورة؟
+   * الإرجاع (#btn-DeleteClaim) مسموح **بس** في الحالة دي: إحنا اللي فتحنا
+   * الاستمارة في الصرف، فإحنا اللي بنرجعها. لو الصورة جت من نافذة مفتوحة
+   * أصلًا أو من غير ما نفتح الروشتة، مفيش حذف خالص.
+   */
+  let openedByUs = false;
   try {
     // نافذة صورة مفتوحة من محاولة سابقة/من المستخدم: بنلقطها بدل ما نضغط تاني
     let image = await popup.adoptExisting();
@@ -1901,6 +1978,7 @@ async function processForm(win, job) {
       if (!clicked) {
         return { ok: false, error: `الرقم المرجعي ${reference} غير موجود في الصفحة`, timings };
       }
+      openedByUs = true;
       capLog(ref, `تم الضغط على الرقم المرجعي (${clicked})`);
       timings.clickMs = Date.now() - t0 - (timings.searchMs || 0);
 
@@ -2001,7 +2079,15 @@ async function processForm(win, job) {
     // الإرجاع في الخلفية — مش بيوقف جلب الصورة اللي بعده
     let deleteState = "skipped";
     let deleteQueue = 0;
-    if (!preventDelete) {
+    if (!openedByUs) {
+      // مفتحناش الروشتة في إحنا في مسار الصرف → مفيش إرجاع
+      deleteState = "skipped-no-open";
+      notes.push("الإرجاع اتخطى: الصورة ماجاتش من فتح الروشتة");
+      capLog(ref, "مفيش إرجاع — الصورة ماجاتش من فتح الروشتة");
+    } else if (preventDelete) {
+      deleteState = "skipped-user";
+      notes.push("الإرجاع متوقف من الإعدادات");
+    } else {
       const candidates = [];
       if (href) candidates.push(href.startsWith("http") ? href : `${BASE}${href}`);
       for (const url of popup.urls) candidates.push(url);
@@ -2675,6 +2761,15 @@ ipcMain.handle("nd:deletes", async () => {
   };
 });
 
+/**
+ * إلغاء الإرجاعات — بيتنادى لما المستخدم يوقف/يلغي العملية.
+ * الإلغاء معناه: مفيش #btn-DeleteClaim بيتضغط على أي استمارة لسه ما اترجعتش.
+ */
+ipcMain.handle("nd:cancel-deletes", async (_e, payload) => {
+  const res = cancelPendingDeletes(String(payload?.reason || "المستخدم لغى العملية"));
+  return { ok: true, data: res };
+});
+
 /** إعادة محاولة الإرجاعات الفاشلة — آخر الجلسة، مرة واحدة */
 ipcMain.handle("nd:retry-deletes", async () => {
   const count = retryFailedDeletes();
@@ -2796,6 +2891,8 @@ ipcMain.handle("nd:close-all", async () => {
   await captures.closeAll();
   await deleters.closeAll();
   deleteJobs.length = 0;
+  // قفل النوافذ = إلغاء العملية → مفيش أي إرجاع لسه في الطابور بيتنفذ
+  cancelPendingDeletes("اتقفلت النوافذ");
   if (waWin && !waWin.isDestroyed()) waWin.destroy();
   waWin = null;
   // نافذة الدخول المرئية بتتقفل كمان — الجلسة محفوظة في الـ partition

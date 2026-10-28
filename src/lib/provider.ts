@@ -46,6 +46,8 @@ export interface RoshettaBridge {
   >;
   /** إعادة محاولة الإرجاعات الفاشلة مرة واحدة */
   retryDeletes: () => Promise<BridgeResult<{ retried: number }>>;
+  /** إلغاء أي إرجاع لسه ما اتنفذش — الإلغاء معناه مفيش حذف خالص */
+  cancelDeletes: (p?: { reason?: string }) => Promise<BridgeResult<{ cancelled: number; running: number }>>;
   /** كتابة سطر في ملف اللوج على القرص (يفضل بعد قفل البرنامج) */
   log: (p: { level: string; msg: string }) => Promise<BridgeResult>;
   /** فحص السلكتورات على الموقع الحقيقي — بيقول أي سلكتور اختفى */

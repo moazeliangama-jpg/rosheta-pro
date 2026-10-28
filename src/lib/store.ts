@@ -681,6 +681,14 @@ export const useAppStore = create<AppState>()(
       partialize: persistSlice,
       onRehydrateStorage: () => (state) => {
         if (!state) return;
+        // ترقية الإعدادات: الإعدادات المحفوظة من إصدار قديم مش فيها كل المفاتيح،
+        // فأي مفتاح جديد بياخد القيمة الافتراضية بدل ما يبقى undefined.
+        // الترقية بتتنفذ بس لو فيه مفتاح ناقص — عشان ما نعلّمش الحالة «متغيرة»
+        // من غير سبب ونرجّع إشارة جديدة على الفاضي.
+        const saved = state.settings as Partial<typeof defaultSettings>;
+        if (Object.keys(defaultSettings).some((key) => saved[key as keyof typeof defaultSettings] === undefined)) {
+          state.setSettings({ ...defaultSettings, ...state.settings });
+        }
         if (state.session.state === "running" || state.session.state === "paused" || state.session.state === "scanning") {
           state.patchSession({ state: "done", endedAt: state.session.endedAt ?? Date.now() });
           state.logLine("warn", "البرنامج اتقفل أثناء التشغيل — الجلسة السابقة اتقفلت. اضغط «استكمال» لتكملة الباقي.");

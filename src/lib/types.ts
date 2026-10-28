@@ -179,6 +179,8 @@ export interface SessionMeta {
   autoTuned: number;
   /** وقت الإنقاذ: نافذة متعلقة اتدمّرت */
   stuckWindows: number;
+  /** عدد الإرجاعات اللي اتلغت لأن المستخدم لغى العملية (مفيش حذف حصل) */
+  cancelStoppedDeletes?: number;
 }
 
 export interface OutreachMessage {
@@ -202,7 +204,13 @@ export interface Payer {
 }
 
 export interface Settings {
+  /** مكان العمل الأساسي (للبروفايلات والتقارير) — بيتحدد من أول مكان مختار */
   workplace: string;
+  /**
+   * أماكن العمل المختارة للجرد: السابات اللي في الأماكن دي بس هي اللي بتتراجع.
+   * فاضية = كل أماكن العمل. الاختيار هنا هو اللي بيتنفذ فعلًا.
+   */
+  workplaces: string[];
   payerId: string;
   payerName: string;
   niceDeerUser: string;

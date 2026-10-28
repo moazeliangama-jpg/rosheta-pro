@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { flushSave, useAppStore } from "../lib/store";
 import { readPatientsFile } from "../lib/excel";
-import { groupByWorkplace } from "../lib/eligibility";
+import { filterByWorkplaces, groupByWorkplace, selectedWorkplaces } from "../lib/eligibility";
 import { PAYERS } from "../lib/payers";
 import { bridge, hasDesktopBridge } from "../lib/provider";
 import { Badge, Button, Card, Field, SectionTitle, Toggle } from "../components/ui";
@@ -30,6 +30,7 @@ import type { ReadinessItem } from "../lib/ux";
 import { toast as toastLib } from "../lib/toast";
 import { DevicePanel } from "../components/DevicePanel";
 import { WorkspacePanel } from "../components/WorkspacePanel";
+import { SpeedAnalyzerPanel } from "../components/SpeedAnalyzerPanel";
 import { cn, nowTime } from "../lib/utils";
 
 export function SetupScreen({
@@ -69,12 +70,20 @@ export function SetupScreen({
   const fileRef = useRef<HTMLInputElement>(null);
 
   const workplaces = useMemo(() => groupByWorkplace(patients), [patients]);
-  const filtered = useMemo(
-    () => patients.filter((p) => !settings.workplace || (p.workplace || "بدون مكان عمل") === settings.workplace),
-    [patients, settings.workplace],
+  /** أماكن العمل المختارة — دي بالظبط اللي هتتراجع، مفيش ساب من برّاها */
+  const selection = useMemo(
+    () => selectedWorkplaces(settings),
+    [settings.workplaces, settings.workplace],
   );
+  const filtered = useMemo(() => filterByWorkplaces(patients, selection), [patients, selection]);
   const caseList = Object.values(cases);
   const hasScan = caseList.length > 0;
+  /** استمارات التشغيل الجاي — للسابات اللي في الأماكن المختارة بس */
+  const targetForms = useMemo(
+    () =>
+      caseList.filter((c) => !selection.length || selection.includes((c.workplace || "بدون مكان عمل").trim())).length,
+    [caseList, selection],
+  );
   const needsImages = caseList.filter((c) => c.valid && c.rx.status !== "ready").length;
 
   // لوحة الجاهزية والتلميحات — بتتحسب من الحالة الحقيقية للبرنامج
@@ -92,8 +101,24 @@ export function SetupScreen({
    * اختيار مكان العمل = خطوة واحدة: لو فيه إعداد محفوظ لنفس المكان
    * بنعرض تطبيقه (باير + صلاحية + رسائل) بدل ما المستخدم يعيدها كل مرة.
    */
+  /**
+   * اختيار أكتر من مكان عمل: الكل = مفيش اختيار (كل السابات).
+   * الاختيار هو اللي بيتنفذ فعلًا في التشغيل — مش مجرد فلتر في الشاشة.
+   */
+  const toggleWorkplace = (name: string) => {
+    const current = selectedWorkplaces(settings);
+    const on = current.includes(name);
+    const next = on ? current.filter((w) => w !== name) : [...current, name];
+    setSettings({ workplaces: next, workplace: next[0] ?? "" });
+    if (!on) suggestProfile(name);
+  };
+
   const pickWorkplace = (name: string) => {
-    setSettings({ workplace: name });
+    setSettings({ workplaces: name ? [name] : [], workplace: name });
+    if (name) suggestProfile(name);
+  };
+
+  const suggestProfile = (name: string) => {
     const match = Object.keys(profiles).find((n) => profiles[n].workplace === name);
     if (!match) return;
     toastLib.info(`فيه إعداد محفوظ لمكان «${name}» — أطبّقه؟`, {
@@ -215,8 +240,8 @@ export function SetupScreen({
       loadPatients(list);
       resetRun();
       const groups = groupByWorkplace(list);
-      const first = [...groups.keys()][0] ?? "";
-      setSettings({ workplace: first });
+      // افتراضيًا كل الأماكن مختارة — مفيش ساب بيتشال من الجرد من غير ما تختار
+      setSettings({ workplaces: [], workplace: "" });
       logLine("ok", `تم تحميل ${list.length} ساب في ${groups.size} مكان عمل.`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "فشل قراءة الملف";
@@ -233,7 +258,7 @@ export function SetupScreen({
       return;
     }
     if (!filtered.length) {
-      setError("مفيش سابات في مكان العمل المختار.");
+      setError(selection.length ? `مفيش سابات في الأماكن المختارة: ${selection.join(" · ")}` : "مفيش سابات في الملف.");
       return;
     }
     setError("");
@@ -497,23 +522,62 @@ export function SetupScreen({
           <Button onClick={() => fileRef.current?.click()} disabled={busy === "file"}>
             <Upload className="h-4 w-4" /> {busy === "file" ? "جارٍ القراءة…" : "ارفع ملف Excel"}
           </Button>
-          <select
-            value={settings.workplace}
-            onChange={(e) => pickWorkplace(e.target.value)}
-            className="rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:border-teal-400/60 focus:outline-none"
-          >
-            <option value="">كل أماكن العمل ({patients.length})</option>
-            {[...workplaces.entries()].map(([name, list]) => (
-              <option key={name} value={name} className="bg-[#0b1518]">
-                {name} ({list.length})
-              </option>
-            ))}
-          </select>
           <Badge tone={filtered.length ? "ok" : "neutral"}>
             <FileSpreadsheet className="h-3 w-3" /> {filtered.length} ساب هيتشغلوا
           </Badge>
           {error ? <span className="text-xs text-rose-300">{error}</span> : null}
         </div>
+
+        {patients.length ? (
+          <div className="mt-3 rounded-xl border border-white/10 bg-black/20 p-2.5">
+            <div className="mb-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-white/45">
+              <ListChecks className="h-3.5 w-3.5" />
+              أماكن العمل — السابات اللي في الأماكن المختارة بس هي اللي هتتراجع
+              {selection.length ? (
+                <span className="text-teal-300">
+                  ({selection.length} مكان · {filtered.length} ساب)
+                </span>
+              ) : (
+                <span className="text-white/40">(الكل — {filtered.length} ساب)</span>
+              )}
+            </div>
+            <div className="flex flex-wrap gap-1.5">
+              <button
+                type="button"
+                onClick={() => pickWorkplace("")}
+                className={cn(
+                  "rounded-lg border px-2 py-1 text-[11px] transition",
+                  selection.length === 0
+                    ? "border-teal-400/50 bg-teal-500/15 text-teal-100"
+                    : "border-white/10 bg-white/5 text-white/60 hover:border-white/25",
+                )}
+              >
+                كل الأماكن ({patients.length})
+              </button>
+              {[...workplaces.entries()].map(([name, list]) => {
+                const on = selection.includes(name);
+                return (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => toggleWorkplace(name)}
+                    aria-pressed={on}
+                    className={cn(
+                      "flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] transition",
+                      on
+                        ? "border-teal-400/50 bg-teal-500/15 text-teal-100"
+                        : "border-white/10 bg-white/5 text-white/60 hover:border-white/25",
+                    )}
+                  >
+                    <span className="tabular-nums">{on ? "✓" : "+"}</span>
+                    {name}
+                    <span className="text-white/35 tabular-nums">({list.length})</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
 
         {filtered.length > 0 ? (
           <div className="mt-3 max-h-48 overflow-auto rounded-xl border border-white/10">
@@ -732,6 +796,11 @@ export function SetupScreen({
           ) : null}
         </div>
         <p className="mt-1.5 text-[11px] text-white/35">{ux.action.hint}</p>
+
+        {/* محلّل السرعة: أسرع ترتيب للجرد من القياس الحقيقي على الجهاز */}
+        <div className="mt-3">
+          <SpeedAnalyzerPanel sabs={filtered.length} forms={targetForms} />
+        </div>
         {!settings.preventDelete ? (
           <p className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
             تنبيه: «الإرجاع» مفعّل — البرنامج هيضغط <code>#btn-DeleteClaim</code> على كل استمارة بعد التقاط صورتها

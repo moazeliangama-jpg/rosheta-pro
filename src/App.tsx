@@ -15,6 +15,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useAppStore } from "./lib/store";
+import { filterByWorkplaces, selectedWorkplaces } from "./lib/eligibility";
 import { SessionEngine, refreshValidity } from "./lib/engine";
 import { hasDesktopBridge, bridge } from "./lib/provider";
 // ٥٨) الشاشات بتتحمّل وقت الحاجة — فتح البرنامج بيبقى أسرع
@@ -190,9 +191,11 @@ export default function App() {
       return;
     }
     const st = useAppStore.getState();
-    const list = st.patients.filter((p) => !st.settings.workplace || (p.workplace || "بدون مكان عمل") === st.settings.workplace);
+    // الأماكن المختارة هي اللي بتتراجع — أي ساب برّاها مش بيدخل التشغيل خالص
+    const chosen = selectedWorkplaces(st.settings);
+    const list = filterByWorkplaces(st.patients, chosen);
     if (!list.length) {
-      logLine("error", "مفيش سابات في مكان العمل المختار.");
+      logLine("error", chosen.length ? `مفيش سابات في الأماكن المختارة: ${chosen.join(" · ")}` : "مفيش سابات في الملف.");
       return;
     }
     if (!st.settings.payerId) {
