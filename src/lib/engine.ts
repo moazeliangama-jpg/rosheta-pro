@@ -353,9 +353,12 @@ export class SessionEngine {
       `بدء التشغيل — ${patients.length} ساب، ${this.workers} نوافذ، ${s0.turboMode ? "وضع مرعب ⚡" : "وضع عادي"}، الباير: ${s0.payerName || "غير محدد"}`,
     );
 
-    // الوضع المرعب: بنشتغل كل ساب لآخره (جرد + صور) على نفس النافذة —
-    // بحث واحد لكل ساب بدل ما الجرد كله يخلص وبعدها نعيد البحث لكل استمارة.
-    if (doScan && doImages && s0.turboMode) {
+    /**
+     * كل متصفح بياخد ساب واحد ويمشي عليه من أول جرد لحد آخر استمارة **دايمًا**
+     * (مش في الوضع المرعب بس): النافذة بتحتفظ بنتايج بحث الساب، فمفيش بحث
+     * جديد لكل استمارة — وده اللي بيخلي الصرف سريع مع إن كل الخطوات حقيقية.
+     */
+    if (doScan && doImages) {
       await this.pipelinePhase(patients);
     } else {
       if (doScan) await this.scanPhase(patients);
@@ -635,7 +638,7 @@ export class SessionEngine {
    * بيوفر بحث كامل لكل استمارة لأن نتايج الساب بتفضل محفوظة في النافذة.
    */
   private async pipelinePhase(patients: PatientRow[]) {
-    this.log("info", `وضع مرعب ⚡: خطة مختلطة — كل ساب بيتجرد وبيتصور على نفس النافذة (${this.workers} نوافذ).`);
+    this.log("info", `كل متصفح بياخد ساب واحد ويكمّل عليه كل استماراته (${this.workers} نوافذ).`);
 
     await pool(patients, this.workers, async (patient) => {
       while (this.paused && !this.cancelled) await sleep(150);
@@ -662,6 +665,14 @@ export class SessionEngine {
         await this.fetchImage(c);
         this.doneForms += 1;
         this.onTick();
+      }
+
+      // الساب خلص استماراته بالكامل على نفس المتصفح → المتصفح يرجع للحوض
+      // نضيف، والساب اللي بعده يبدأ من صفحة بحث جديدة (عزل حقيقي مش شكلي)
+      try {
+        await bridge()?.releaseSab({ sab: patient.sab });
+      } catch {
+        /* تحرير النافذة مش حرج */
       }
     });
 

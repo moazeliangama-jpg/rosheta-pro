@@ -46,6 +46,8 @@ export interface RoshettaBridge {
   >;
   /** إعادة محاولة الإرجاعات الفاشلة مرة واحدة */
   retryDeletes: () => Promise<BridgeResult<{ retried: number }>>;
+  /** خلاص استمارات الساب — المتصفح اللي شايله يرجع للحوض */
+  releaseSab: (p: { sab: string }) => Promise<BridgeResult<{ sab: string; released: number }>>;
   /** إلغاء أي إرجاع لسه ما اتنفذش — الإلغاء معناه مفيش حذف خالص */
   cancelDeletes: (p?: { reason?: string }) => Promise<BridgeResult<{ cancelled: number; running: number }>>;
   /** كتابة سطر في ملف اللوج على القرص (يفضل بعد قفل البرنامج) */

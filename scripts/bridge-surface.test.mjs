@@ -107,9 +107,13 @@ test("كل دالة في preload متنادية من الواجهة (مفيش ق
 
 test("كل قناة IPC ليها طرفين: معالج في main واستدعاء في preload", () => {
   const main = read("electron/main.cjs");
-  const pre = read("electron/preload.cjs");
+  // فيه أكتر من preload حقيقي: واجهة البرنامج + preload نافذة نايس دير
+  // + preload شريط المتصفح (أزرار رجوع/تقدم/تحديث/تثبيت لكل نافذة)
+  const pres = ["electron/preload.cjs", "electron/nd-window-preload.cjs", "electron/browser-chrome-preload.cjs"];
   const handled = new Set([...main.matchAll(/ipcMain\.(?:handle|on)\("([^"]+)"/g)].map((m) => m[1]));
-  const called = new Set([...pre.matchAll(/ipcRenderer\.(?:invoke|send)\("([^"]+)"/g)].map((m) => m[1]));
+  const called = new Set(
+    pres.flatMap((file) => [...read(file).matchAll(/ipcRenderer\.(?:invoke|send)\("([^"]+)"/g)].map((m) => m[1])),
+  );
   // قناة بتتبعت من نافذة نايس دير نفسها (preload تاني) مش من واجهة البرنامج
   const windowOnly = new Set(["nd:page-dialog"]);
   assert.deepEqual([...called].filter((c) => !handled.has(c)), [], "قنوات في preload ملهاش معالج في main");
