@@ -3,6 +3,7 @@ import { CheckCircle2, Info, ShieldAlert, XCircle } from "lucide-react";
 import { useAppStore } from "../lib/store";
 import { hasDesktopBridge } from "../lib/provider";
 import { Badge, Card, SectionTitle } from "./ui";
+import { BugReportPanel } from "./BugReportPanel";
 
 /**
  * لوحة تشخيص حقيقية: بتقول سبب عدم ظهور الروشتة بالضبط،
@@ -94,6 +95,7 @@ export function DiagnosticsPanel() {
   }, [cases, settings, imagesHydrated, loggedIn, session]);
 
   return (
+    <div className="space-y-4">
     <Card>
       <SectionTitle hint="بيتحدث تلقائيًا">تشخيص عرض الروشتات</SectionTitle>
       <div className="space-y-2">
@@ -128,5 +130,7 @@ export function DiagnosticsPanel() {
         })}
       </div>
     </Card>
+    <BugReportPanel />
+    </div>
   );
 }

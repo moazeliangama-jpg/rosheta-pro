@@ -56,10 +56,45 @@ export interface RoshettaBridge {
   preflight: () => Promise<BridgeResult<{ checks: Array<{ key: string; label: string; ok: boolean; detail: string }>; ok: boolean; dirs?: Record<string, string> }>>;
   /** ١٢٧) صيانة ملفات اللوج والتشخيص: إحصاء / تنضيف القديم / مسح الكل */
   maintenance: (p: {
-    action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" | "open-backups";
+    action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" | "open-backups" | "open-bug-reports";
   }) => Promise<BridgeResult<MaintenanceInfo & { dir?: string }>>;
   /** ٦٠) نسخة احتياطية يومية: الملف بيتحفظ في بيانات البرنامج */
   backup: (p: { name: string; json: string }) => Promise<BridgeResult<{ file: string; bytes: number }>>;
+  /**
+   * الإبلاغ التلقائي عن الأخطاء غير المتوقعة.
+   * `enabled: false` بيوقّف الإرسال (البلاغ بيتحفظ محليًا بس).
+   */
+  reportError: (payload: {
+    name?: string;
+    message: string;
+    stack?: string;
+    source?: string;
+    screen?: string;
+    phase?: string;
+    notes?: string;
+    enabled?: boolean;
+  }) => Promise<
+    BridgeResult<{ status: "sent" | "queued" | "existing" | "duplicate" | "rate-limit" | "disabled"; url?: string; number?: number }>
+  >;
+  /** حالة الإبلاغ: مفعّل/محتاج توكن + عدد البلاغات والطابور */
+  bugReport: {
+    info: () => Promise<
+      BridgeResult<{
+        enabled: boolean;
+        reason: string;
+        repo: string;
+        tokenVar: string;
+        hint?: string;
+        sentToday: number;
+        maxPerDay: number;
+        pending: number;
+        lastSentAt: number;
+        lastSentUrl: string;
+        dir: string;
+      }>
+    >;
+    flush: () => Promise<BridgeResult<{ sent: number; remaining: number }>>;
+  };
   /** ٩٦) تحديث البرنامج: فحص الإصدار، تنزيل المثبّت، وتشغيله */
   updates: {
     check: () => Promise<
@@ -134,7 +169,9 @@ declare global {
   }
 }
 
-export const bridge = (): RoshettaBridge | null => window.roshetta ?? null;
+// الجسر مش موجود في المتصفح ولا في بيئة الاختبار — الفحص لازم ما يرميش
+export const bridge = (): RoshettaBridge | null =>
+  typeof window === "undefined" ? null : (window.roshetta ?? null);
 export const hasDesktopBridge = () => Boolean(bridge());
 
 export function requireBridge(): RoshettaBridge {

@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { parseVersion, isNewer, pickInstallerAsset, describeUpdate } = require("../electron/updates.cjs");
+const { parseVersion, isNewer, pickInstallerAsset, describeUpdate, isAllowedUpdateUrl, isInsideDir } = require(
+  "../electron/updates.cjs",
+);
 
 test("تفكيك الإصدار", () => {
   assert.deepEqual(parseVersion("v1.2.3"), { major: 1, minor: 2, patch: 3, pre: "" });
@@ -49,4 +51,32 @@ test("ملخص التحديث للمستخدم", () => {
   assert.match(withAsset.message, /1\.2\.0/);
   const noAsset = describeUpdate({ current: "1.0.0", latest: "1.2.0", asset: null });
   assert.equal(noAsset.canInstall, false);
+});
+
+// ---------------------------------------------------------------------------
+// حراسة روابط/ملفات التحديث (أمان)
+// ---------------------------------------------------------------------------
+
+test("حراسة الرابط: مضيفات GitHub بس و https بس", () => {
+  assert.equal(isAllowedUpdateUrl("https://github.com/o/r/releases/download/v1/app.exe"), true);
+  assert.equal(isAllowedUpdateUrl("https://objects.githubusercontent.com/x/app.exe"), true);
+  assert.equal(isAllowedUpdateUrl("https://release-assets.githubusercontent.com/x"), true);
+  // مضيف شبه الاسم / بروتوكول غير آمن / بيانات دخول
+  assert.equal(isAllowedUpdateUrl("https://github.com.evil.com/app.exe"), false);
+  assert.equal(isAllowedUpdateUrl("http://github.com/app.exe"), false);
+  assert.equal(isAllowedUpdateUrl("file:///C:/Windows/System32/calc.exe"), false);
+  assert.equal(isAllowedUpdateUrl("https://user:pass@github.com/app.exe"), false);
+  assert.equal(isAllowedUpdateUrl(""), false);
+  assert.equal(isAllowedUpdateUrl("not a url"), false);
+});
+
+test("حراسة الملف: لازم يكون exe جوه مجلد التحديث", () => {
+  const dir = "C:\\Users\\m\\AppData\\Local\\Temp\\roshetta-update";
+  assert.equal(isInsideDir(`${dir}\\RoshettaPro-Setup-1.2.0.exe`, dir), true);
+  // برّه المجلد / امتداد تاني / محاولة خروج بـ ..
+  assert.equal(isInsideDir("C:\\Windows\\System32\\calc.exe", dir), false);
+  assert.equal(isInsideDir(`${dir}\\..\\..\\evil.exe`, dir), false);
+  assert.equal(isInsideDir(`${dir}\\readme.txt`, dir), false);
+  assert.equal(isInsideDir(`${dir}-evil\\x.exe`, dir), false);
+  assert.equal(isInsideDir("", dir), false);
 });

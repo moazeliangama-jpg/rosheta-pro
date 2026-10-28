@@ -39,6 +39,9 @@ jobs:
           node --check electron/main.cjs
           node --check electron/preload.cjs
           node --check electron/snippets.cjs
+          node --check electron/security.cjs
+          node --check electron/updates.cjs
+          node --check electron/bugreport.cjs
 
       - name: Build
         run: npm run build

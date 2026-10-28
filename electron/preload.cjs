@@ -21,6 +21,15 @@ contextBridge.exposeInMainWorld("roshetta", {
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
   preflight: () => ipcRenderer.invoke("app:preflight"),
+  /**
+   * الإبلاغ التلقائي: بيتبعت للعملية الرئيسية، وهي اللي بتتكلم مع GitHub.
+   * التوكن عمره ما بيوصل هنا — بيقرأ من متغيرات البيئة في main بس.
+   */
+  reportError: (payload) => ipcRenderer.invoke("app:report-error", payload),
+  bugReport: {
+    info: () => ipcRenderer.invoke("app:bug-report-info"),
+    flush: () => ipcRenderer.invoke("app:flush-bug-reports"),
+  },
   /** ٩٦) تحديث البرنامج من GitHub Releases */
   updates: {
     check: () => ipcRenderer.invoke("app:check-update"),

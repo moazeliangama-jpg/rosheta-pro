@@ -32,6 +32,7 @@ const S = require("./snippets.cjs");
 const { parseDateToISO, isMonthlyText } = require("./nice-utils.cjs");
 const SEC = require("./security.cjs");
 const UPD = require("./updates.cjs");
+const BUG = require("./bugreport.cjs");
 
 const BASE = "https://nicedeer.net";
 const LOGIN_URL = `${BASE}/Account/Login`;
@@ -1385,8 +1386,8 @@ function systemInfo() {
 
 ipcMain.handle("nd:set-credentials", async (_e, payload) => {
   credentials = {
-    username: String(payload?.username || ""),
-    password: String(payload?.password || ""),
+    username: String(payload?.username || "").slice(0, 200),
+    password: String(payload?.password || "").slice(0, 400),
   };
   if (payload?.maxWorkers) workers.max = Math.max(1, Math.min(MAX_WORKERS, Number(payload.maxWorkers) || 5));
   return { ok: true };
@@ -1462,7 +1463,12 @@ ipcMain.handle("nd:warmup", async (_e, payload) => {
 });
 
 ipcMain.handle("nd:login", async (_e, payload) => {
-  if (payload?.username) credentials = { username: payload.username, password: payload.password || "" };
+  if (payload?.username) {
+    credentials = {
+      username: String(payload.username).slice(0, 200),
+      password: String(payload.password || "").slice(0, 400),
+    };
+  }
   try {
     return await workers.with(async (win) => {
       const state = await pageState(win);
@@ -1489,10 +1495,21 @@ let updateState = { checkedAt: 0, info: null, downloading: 0, file: "" };
 async function fetchLatestRelease() {
   const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
     headers: { Accept: "application/vnd.github+json", "User-Agent": "RoshettaPro-Updater" },
+    // من غير timeout، الشبكة البطيئة بتخلّي الزرار «بيفحص» للأبد
+    signal: AbortSignal.timeout(15000),
   });
+  if (res.status === 404) throw new Error("مفيش إصدارات منشورة على GitHub لسه — ارفع أول Release.");
   if (!res.ok) throw new Error(`GitHub ردّ بـ ${res.status}`);
   return res.json();
 }
+
+/** مجلد التحديث الوحيد المسموح — أي مسار براه مرفوض */
+const updateDir = () => path.join(app.getPath("temp"), "roshetta-update");
+
+/** حراسة المسار والرابط في updates.cjs (متاختبرة) */
+const isInsideUpdateDir = (file) => UPD.isInsideDir(file, updateDir());
+const hostAllowedForUpdate = (url) => UPD.isAllowedUpdateUrl(url);
+const MAX_UPDATE_BYTES = UPD.MAX_UPDATE_BYTES;
 
 ipcMain.handle("app:check-update", async () => {
   try {
@@ -1515,14 +1532,24 @@ ipcMain.handle("app:check-update", async () => {
 
 ipcMain.handle("app:download-update", async (_e, payload) => {
   try {
-    if (!SEC.isSafeExternalUrl(payload?.url)) return { ok: false, error: "رابط التحديث غير صالح" };
+    // الرابط لازم يكون https + من مضيفات GitHub نفسها (مش أي رابط آمن شكله)
+    if (!SEC.isSafeExternalUrl(payload?.url) || !hostAllowedForUpdate(payload.url)) {
+      return { ok: false, error: "رابط التحديث غير مسموح" };
+    }
     const name = String(payload?.asset || "RoshettaPro-Setup.exe").replace(/[^\w.\-]/g, "_");
-    const dir = path.join(app.getPath("temp"), "roshetta-update");
+    const dir = updateDir();
     fs.mkdirSync(dir, { recursive: true });
     const file = path.join(dir, name);
-    const res = await fetch(payload.url, { headers: { "User-Agent": "RoshettaPro-Updater" } });
+    const res = await fetch(payload.url, {
+      headers: { "User-Agent": "RoshettaPro-Updater" },
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    });
     if (!res.ok) throw new Error(`فشل تنزيل التحديث (${res.status})`);
+    // سقف حجم: ملف ضخم/مضلّل مايملاش القرص ولا يعلّق الذاكرة
+    const declared = Number(res.headers?.get?.("content-length") || 0);
+    if (declared > MAX_UPDATE_BYTES) throw new Error("حجم التحديث أكبر من المسموح");
     const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.length > MAX_UPDATE_BYTES) throw new Error("حجم التحديث أكبر من المسموح");
     fs.writeFileSync(file, buffer);
     updateState = { ...updateState, downloading: 0, file };
     appendLog("ok", `update downloaded: ${file} (${Math.round(buffer.length / 1024 / 1024)} ميجا)`);
@@ -1535,8 +1562,14 @@ ipcMain.handle("app:download-update", async (_e, payload) => {
 /** تشغيل المثبّت اللي اتنزّل — NSIS بيقبل /S للتثبيت الصامت */
 ipcMain.handle("app:run-update", async (_e, payload) => {
   try {
-    const file = String(payload?.file || updateState.file || "");
-    if (!file || !fs.existsSync(file)) return { ok: false, error: "ملف التحديث مش موجود" };
+    const requested = String(payload?.file || updateState.file || "");
+    // أي مسار برّه مجلد التحديث (أو مش exe) مرفوض — حتى لو الواجهة اتبعتت لها قيمة غريبة
+    if (!isInsideUpdateDir(requested)) return { ok: false, error: "مسار التحديث غير مسموح" };
+    if (updateState.file && path.resolve(requested) !== path.resolve(updateState.file)) {
+      return { ok: false, error: "الملف مش هو اللي اتنزّل من الإصدار" };
+    }
+    if (!fs.existsSync(requested)) return { ok: false, error: "ملف التحديث مش موجود" };
+    const file = requested;
     const child = spawn(file, ["/S"], { detached: true, stdio: "ignore" });
     child.unref();
     appendLog("ok", `installer started: ${file}`);
@@ -1578,6 +1611,8 @@ ipcMain.handle("app:backup", async (_e, payload) => {
   try {
     const json = String(payload?.json || "");
     if (!json) return { ok: false, error: "مفيش بيانات للنسخة الاحتياطية" };
+    // نسخة احتياطية أكبر من ٦٤ ميجا معناها حالة تالفة — مش بنكتبها
+    if (json.length > 64 * 1024 * 1024) return { ok: false, error: "حجم النسخة الاحتياطية أكبر من المسموح" };
     const name = String(payload?.name || `rosheta-backup-${new Date().toISOString().slice(0, 10)}.json`).replace(
       /[^\w.\-]/g,
       "_",
@@ -1607,6 +1642,11 @@ ipcMain.handle("app:maintenance", async (_e, payload) => {
     const action = payload?.action || "stats";
     if (action === "prune") return { ok: true, data: pruneRuntime({ all: false }) };
     if (action === "clear") return { ok: true, data: pruneRuntime({ all: true }) };
+    if (action === "open-bug-reports") {
+      fs.mkdirSync(bugDir(), { recursive: true });
+      await shell.openPath(bugDir());
+      return { ok: true, data: { dir: bugDir() } };
+    }
     if (action === "open-logs") {
       ensureRuntimeDirs();
       const err = await shell.openPath(logsDir());
@@ -1672,7 +1712,9 @@ ipcMain.handle("nd:dump-html", async (_e, payload) => {
     const dir = diagDir();
     fs.mkdirSync(dir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const file = path.join(dir, `dump-${payload?.sab || "page"}-${stamp}.html`);
+    // رقم الساب بييجي من الواجهة — بيتنضف قبل ما يدخل في اسم ملف (منع path traversal)
+    const sabTag = SEC.sanitizeSab(payload?.sab) || "page";
+    const file = path.join(dir, `dump-${sabTag}-${stamp}.html`);
     fs.writeFileSync(file, html, "utf8");
     appendLog("warn", `dump-html: ${file}`);
     return { ok: true, data: { file } };
@@ -1762,8 +1804,9 @@ ipcMain.handle("app:notify", async (_e, payload) => {
   try {
     if (!Notification.isSupported()) return { ok: false, error: "الإشعارات غير مدعومة" };
     const n = new Notification({
-      title: String(payload?.title || "روشتة برو"),
-      body: String(payload?.body || ""),
+      // سقف أطوال: إشعار ضخم من الواجهة مايعلّقش نظام الإشعارات
+      title: String(payload?.title || "روشتة برو").slice(0, 120),
+      body: String(payload?.body || "").slice(0, 500),
       silent: false,
     });
     n.on("click", () => {
@@ -1867,21 +1910,26 @@ ipcMain.handle("wa:logout", async () => {
 });
 
 ipcMain.handle("wa:send", async (_e, payload) => {
-  const { phone, text } = payload || {};
+  const { text } = payload || {};
+  // الرقم بيتنضف لأرقام بس (مدخل غير موثوق) — وقبل أي بناء رابط
+  const phone = SEC.sanitizePhone(payload?.phone);
   if (!phone || !text) return { ok: false, error: "رقم الهاتف والنص مطلوبين" };
+  if (phone.length < 8) return { ok: false, error: "رقم الهاتف غير صالح" };
+  const body = String(text).slice(0, 4000);
   const win = await waEnsureOpen();
   let state = await waState(win);
   if (state !== "ready") state = await waWaitReady(25000);
   if (state !== "ready") return { ok: false, error: "واتساب غير متصل — امسح كود QR من بطاقة واتساب" };
 
-  const url = `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(text)}`;
+  const url = `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(body)}`;
   await safeLoad(win, url, 40000);
   const res = await run(win, S.WA_SEND_SCRIPT);
   return res && res.ok ? { ok: true, ms: res.ms } : { ok: false, error: (res && res.error) || "فشل الإرسال" };
 });
 
 ipcMain.handle("wa:replies", async (_e, payload) => {
-  const { phone } = payload || {};
+  const phone = SEC.sanitizePhone(payload?.phone);
+  if (!phone) return { ok: false, error: "رقم الهاتف غير صالح" };
   const win = await waEnsureOpen();
   if ((await waState(win)) !== "ready") return { ok: false, error: "واتساب غير متصل" };
   await safeLoad(win, `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}`, 40000);
@@ -1896,7 +1944,9 @@ ipcMain.handle("wa:replies", async (_e, payload) => {
 });
 
 ipcMain.handle("wa:open-chat", async (_e, payload) => {
-  const { phone, text } = payload || {};
+  const phone = SEC.sanitizePhone(payload?.phone);
+  const text = payload?.text ? String(payload.text).slice(0, 4000) : "";
+  if (!phone) return { ok: false, error: "رقم الهاتف غير صالح" };
   const win = getWaWindow(true);
   if (!(win.webContents.getURL() || "").includes("web.whatsapp.com")) {
     await safeLoad(win, "https://web.whatsapp.com/", 60000);
@@ -1905,6 +1955,280 @@ ipcMain.handle("wa:open-chat", async (_e, payload) => {
   const url = `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}${text ? `&text=${encodeURIComponent(text)}` : ""}`;
   await safeLoad(win, url, 40000);
   return { ok: true };
+});
+
+// ---------------------------------------------------------------------------
+// الإبلاغ التلقائي عن الأخطاء على GitHub
+//
+// القواعد:
+//   • مفيش أي إرسال إلا عند خطأ غير متوقع.
+//   • التوكن من متغير بيئة بس (ROSHTA_GITHUB_TOKEN) — مش على القرص ولا في اللوج.
+//   • كل النص بيتنقّح (توكنات/أرقام/مسارات/إيميلات) قبل ما يتحول لبلاغ.
+//   • نفس الخطأ مرة واحدة كل ٢٤ ساعة، وسقف ٥ بلاغات في اليوم.
+//   • لو مفيش نت/توكن: البلاغ بيتحفظ في طابور ويتبعت لما يبقى متاح.
+// ---------------------------------------------------------------------------
+
+const bugConfig = BUG.readConfig();
+const bugDir = () => path.join(dataDir(), "bug-reports");
+const bugReportsDir = () => path.join(bugDir(), "reports");
+const bugStateFile = () => path.join(bugDir(), "state.json");
+const bugQueueFile = () => path.join(bugDir(), "queue.json");
+const MAX_QUEUE = 10;
+const MAX_LOCAL_REPORTS = 30;
+let lastBugSent = { at: 0, url: "", status: "" };
+let bugFlushing = false;
+
+/** قراءة JSON بأمان — أي ملف تالف بيرجع القيمة الافتراضية */
+function readJsonSafe(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+/** كتابة JSON بشكل ذرّي (ملف مؤقت ثم rename) */
+function writeJsonSafe(file, value) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+    fs.renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const loadBugState = () => BUG.normalizeState(readJsonSafe(bugStateFile(), null));
+const saveBugState = (state) => writeJsonSafe(bugStateFile(), state);
+
+function loadBugQueue() {
+  const raw = readJsonSafe(bugQueueFile(), []);
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item) => item && item.issue && typeof item.issue.title === "string" && typeof item.issue.body === "string")
+    .slice(-MAX_QUEUE);
+}
+
+function saveBugQueue(queue) {
+  return writeJsonSafe(bugQueueFile(), queue.slice(-MAX_QUEUE));
+}
+
+/** آخر سطور ملف اللوج — سياق مفيد في البلاغ */
+function readLogTail(max = 4000) {
+  try {
+    const file = appLogPath || path.join(logsDir(), "rosheta.log");
+    if (!fs.existsSync(file)) return "";
+    const size = fs.statSync(file).size;
+    if (!size) return "";
+    const start = Math.max(0, size - max * 3);
+    const fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(size - start);
+    try {
+      fs.readSync(fd, buf, 0, buf.length, start);
+    } finally {
+      fs.closeSync(fd);
+    }
+    return buf.toString("utf8").slice(-max);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * أي نصوص معروفة الحساسية بتتشال من البلاغ.
+ * بيانات نايس دير بتعيش في الذاكرة هنا في main — فمفيش طريقة تظهر في بلاغ.
+ */
+function bugSecrets() {
+  return [credentials.username, credentials.password].filter(Boolean);
+}
+
+function buildBugContext(source, extra = {}) {
+  return {
+    appVersion: app.getVersion(),
+    platform: os.platform(),
+    arch: os.arch(),
+    osRelease: os.release(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    source,
+    memoryMb: Math.round(os.totalmem() / 1024 ** 2),
+    portable: PORTABLE,
+    workers: workers?.max,
+    phase: extra?.phase,
+    screen: extra?.screen,
+    notes: extra?.notes,
+    logTail: readLogTail(3000),
+  };
+}
+
+/** نسخة محلية من كل بلاغ (للمراجعة والتشخيص حتى لو مفيش توكن) */
+function saveLocalReport(issue, source, at) {
+  try {
+    const dir = bugReportsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const name = `${new Date(at).toISOString().replace(/[:.]/g, "-")}-${issue.fingerprint}.json`;
+    writeJsonSafe(path.join(dir, name), { at, source, ...issue });
+    // تنضيف: نحتفظ بآخر ٣٠ بلاغ
+    const files = dirFiles(dir).sort((a, b) => b.mtime - a.mtime);
+    for (const f of files.slice(MAX_LOCAL_REPORTS)) fs.rmSync(f.full, { force: true });
+  } catch {
+    /* البلاغ المحلي مش أساسي — الفشل هنا مايوقفش البرنامج */
+  }
+}
+
+function enqueueBugReport(issue, source, at, reason) {
+  const queue = loadBugQueue();
+  queue.push({ issue, source, at, reason: String(reason || ""), attempts: 0 });
+  saveBugQueue(queue);
+}
+
+/**
+ * المعالجة الكاملة لخطأ: بناء البلاغ → فحص التكرار → إرسال أو طابور.
+ * عمرها ما بترمي استثناء — الإبلاغ نفسه مايكونش سبب انهيار.
+ */
+async function sendBugReport({ error, source = "main", extra = {}, settingsEnabled = true }) {
+  try {
+    const at = Date.now();
+    const issue = BUG.buildIssuePayload(
+      { error, context: buildBugContext(source, extra), secrets: bugSecrets() },
+      { now: at },
+    );
+    saveLocalReport(issue, source, at);
+
+    if (!settingsEnabled) return { ok: true, status: "disabled", fingerprint: issue.fingerprint };
+
+    const state = loadBugState();
+    const gate = BUG.shouldReport(state, issue.fingerprint, at);
+    if (!gate.ok) return { ok: true, status: gate.reason, fingerprint: issue.fingerprint };
+
+    if (!bugConfig.enabled) {
+      enqueueBugReport(issue, source, at, bugConfig.reason);
+      return { ok: true, status: "queued", reason: bugConfig.reason, fingerprint: issue.fingerprint };
+    }
+
+    // نفس الخطأ ممكن يكون متبلّغ عنه من جهاز تاني — منفتحش بلاغ مكرر
+    const existing = await BUG.findExistingIssue({
+      token: bugConfig.token,
+      repo: bugConfig.repo,
+      fp: issue.fingerprint,
+    });
+    if (existing) {
+      saveBugState(BUG.recordReport(state, issue.fingerprint, at, existing.url));
+      lastBugSent = { at, url: existing.url, status: "existing" };
+      appendLog("info", `bugreport: خطأ معروف من قبل — ${existing.url}`);
+      return { ok: true, status: "existing", url: existing.url, fingerprint: issue.fingerprint };
+    }
+
+    const res = await BUG.postIssue({
+      token: bugConfig.token,
+      repo: bugConfig.repo,
+      issue,
+      log: (level, msg) => appendLog(level, msg),
+    });
+    if (res.ok) {
+      saveBugState(BUG.recordReport(state, issue.fingerprint, at, res.url));
+      lastBugSent = { at, url: res.url, status: "sent" };
+      appendLog("warn", `bugreport: اتفتح بلاغ #${res.number} — ${res.url}`);
+      return { ok: true, status: "sent", url: res.url, number: res.number, fingerprint: issue.fingerprint };
+    }
+    enqueueBugReport(issue, source, at, res.error);
+    appendLog("warn", `bugreport: الإرسال فشل (${res.error}) — البلاغ اتحفظ في الطابور`);
+    return { ok: true, status: "queued", reason: res.error, fingerprint: issue.fingerprint };
+  } catch (err) {
+    // أي فشل في الإبلاغ بيتكتب في اللوج بس — مفيش تعطيل للبرنامج
+    appendLog("warn", `bugreport: تعذّر تكوين البلاغ — ${String(err?.message || err)}`);
+    return { ok: false, status: "error", error: String(err?.message || err) };
+  }
+}
+
+/** محاولة إرسال كل اللي في الطابور (بتتنادى بعد الإقلاع أو بكليك من الواجهة) */
+async function flushBugQueue() {
+  if (bugFlushing || !bugConfig.enabled) return { ok: true, sent: 0, remaining: loadBugQueue().length };
+  bugFlushing = true;
+  let sent = 0;
+  try {
+    const queue = loadBugQueue();
+    const remaining = [];
+    for (const item of queue) {
+      const state = loadBugState();
+      const gate = BUG.shouldReport(state, item.issue.fingerprint, Date.now());
+      if (!gate.ok) continue; // مكرر أو تعدّى السقف اليومي — بيتشال
+      const res = await BUG.postIssue({
+        token: bugConfig.token,
+        repo: bugConfig.repo,
+        issue: item.issue,
+        log: (level, msg) => appendLog(level, msg),
+      });
+      if (res.ok) {
+        sent += 1;
+        saveBugState(BUG.recordReport(state, item.issue.fingerprint, Date.now(), res.url));
+        lastBugSent = { at: Date.now(), url: res.url, status: "sent" };
+      } else {
+        remaining.push({ ...item, attempts: (item.attempts || 0) + 1, reason: res.error });
+      }
+    }
+    saveBugQueue(remaining);
+    if (sent) appendLog("ok", `bugreport: اتبعت ${sent} بلاغ من الطابور`);
+    return { ok: true, sent, remaining: loadBugQueue().length };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err), remaining: loadBugQueue().length };
+  } finally {
+    bugFlushing = false;
+  }
+}
+
+function bugReportInfo() {
+  const state = loadBugState();
+  return {
+    ...BUG.describeConfig(bugConfig),
+    sentToday: BUG.countRecent(state, Date.now()),
+    maxPerDay: BUG.MAX_REPORTS_PER_DAY,
+    pending: loadBugQueue().length,
+    lastSentAt: lastBugSent.at || 0,
+    lastSentUrl: lastBugSent.url || "",
+    dir: bugDir(),
+  };
+}
+
+ipcMain.handle("app:report-error", async (_e, payload) => {
+  const raw = payload || {};
+  // مدخلات غير موثوقة من الواجهة: بنقصّرها وبنبني Error حقيقي منها
+  const message = String(raw.message || "خطأ غير معروف").slice(0, 2000);
+  const stack = String(raw.stack || "").slice(0, 12000);
+  const source = String(raw.source || "renderer").slice(0, 80);
+  const err = new Error(message);
+  err.name = String(raw.name || "Error").slice(0, 60);
+  err.stack = stack || `Error: ${message}`;
+  return sendBugReport({
+    error: err,
+    source,
+    extra: {
+      screen: String(raw.screen || "").slice(0, 40),
+      phase: String(raw.phase || "").slice(0, 40),
+      notes: String(raw.notes || "").slice(0, 500),
+    },
+    settingsEnabled: raw.enabled !== false,
+  });
+});
+
+ipcMain.handle("app:bug-report-info", async () => {
+  try {
+    return { ok: true, data: bugReportInfo() };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle("app:flush-bug-reports", async () => {
+  try {
+    return { ok: true, data: await flushBugQueue() };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1953,11 +2277,46 @@ app.whenReady().then(() => {
     "info",
     `بدء التشغيل — Roshetta Pro v${app.getVersion()}${PORTABLE ? " (نسخة محمولة — البيانات جنب الملف)" : ""} · Electron ${process.versions.electron} · ${os.platform()} ${os.arch()} · رام ${Math.round(os.totalmem() / 1024 ** 3)} جيجا · ${os.cpus()?.length || 0} أنوية`,
   );
-  process.on("uncaughtException", (err) => appendLog("error", `uncaught: ${err?.stack || err}`));
-  process.on("unhandledRejection", (err) => appendLog("error", `unhandled: ${String(err)}`));
+  // حالة الإبلاغ التلقائي بنقولها في اللوج — من غير أي جزء من التوكن
+  appendLog(
+    "info",
+    bugConfig.enabled
+      ? `bugreport: مفعّل → ${bugConfig.repo} (التوكن من ${bugConfig.tokenVar})`
+      : `bugreport: مقفول (${bugConfig.reason}) — البلاغات بتتحفظ محليًا في ${bugDir()}`,
+  );
+  // خطأ غير متوقع في العملية الرئيسية: بيتسجل + بيتبعت بلاغ واحد (بحدود التكرار)
+  process.on("uncaughtException", (err) => {
+    appendLog("error", `uncaught: ${err?.stack || err}`);
+    void sendBugReport({ error: err, source: "main:uncaughtException" });
+  });
+  process.on("unhandledRejection", (err) => {
+    appendLog("error", `unhandled: ${String(err)}`);
+    void sendBugReport({ error: err, source: "main:unhandledRejection" });
+  });
+
+  // انهيار ريندرر/عملية مساعدة = عيب في البرنامج مش في المستخدم — بيتبعت كبلاغ
+  app.on("render-process-gone", (_event, webContents, details) => {
+    const reason = String(details?.reason || "unknown");
+    // الإغلاق العادي (clean-exit) مش خطأ
+    if (reason === "clean-exit") return;
+    const err = new Error(`انهيار الريندرر: ${reason} (exitCode=${details?.exitCode ?? "?"})`);
+    void sendBugReport({ error: err, source: `renderer-gone:${reason}` });
+  });
+  app.on("child-process-gone", (_event, details) => {
+    const type = String(details?.type || "child");
+    if (String(details?.reason || "") === "clean-exit") return;
+    const err = new Error(`انهيار عملية ${type}: ${details?.reason || "unknown"}`);
+    void sendBugReport({ error: err, source: `child-gone:${type}` });
+  });
   session.fromPartition(ND_PARTITION).setUserAgent(UA);
   session.fromPartition(WA_PARTITION).setUserAgent(UA);
   createMainWindow();
+
+  // بلاغات اتحفظت في طابور (مفيش نت/توكن وقتها) بتتحاول تتبعت بهدوء بعد الإقلاع
+  setTimeout(() => {
+    void flushBugQueue();
+  }, 6000);
+
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
   });

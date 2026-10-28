@@ -78,4 +78,67 @@ function describeUpdate({ current, latest, asset }) {
   };
 }
 
-module.exports = { parseVersion, isNewer, pickInstallerAsset, describeUpdate };
+// ---------------------------------------------------------------------------
+// حراسة التنزيل والتشغيل (أمان)
+//
+// البرنامج بينزّل مثبّت من نت ويشغّله — لازم الرابط والملف يكونوا محكومين:
+//   • الرابط https و من مضيفات GitHub نفسها (مش أي رابط «آمن شكله»).
+//   • الملف اللي بيتشغّل لازم يكون جوه مجلد التحديث وبامتداد .exe.
+// ---------------------------------------------------------------------------
+
+const UPDATE_HOSTS = new Set([
+  "github.com",
+  "api.github.com",
+  "objects.githubusercontent.com",
+  "github-releases.githubusercontent.com",
+  "release-assets.githubusercontent.com",
+]);
+
+/** أقصى حجم مقبول للمثبّت (٤٠٠ ميجا) */
+const MAX_UPDATE_BYTES = 400 * 1024 * 1024;
+
+/** هل الرابط https ومن مضيف تحديثات مسموح؟ */
+function isAllowedUpdateUrl(raw) {
+  const text = String(raw || "").trim();
+  if (!text || text.length > 2048) return false;
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:") return false;
+  if (url.username || url.password) return false;
+  return UPDATE_HOSTS.has(url.hostname.toLowerCase());
+}
+
+/**
+ * هل الملف جوه المجلد المخصص للتحديث؟ (منع تشغيل أي exe على الجهاز)
+ * المقارنة بمسار مُحلّل + فاصل مجلد، عشان `..\update-evil` ما تعديش.
+ */
+function isInsideDir(file, dir) {
+  const path = require("node:path");
+  try {
+    // نوحّد الفواصل عشان المقارنة تشتغل على ويندوز ولينكس بالطريقة نفسها
+    // (وبكده الاختبار بيتشغّل على أي نظام من غير ما نفقد حماية `..`)
+    const norm = (p) => path.resolve(String(p || "").replace(/\\/g, path.sep)).replace(/\\/g, "/");
+    const target = norm(file);
+    const base = norm(dir);
+    if (!base || target === base) return false;
+    if (!target.startsWith(`${base}/`)) return false;
+    return /\.exe$/i.test(target);
+  } catch {
+    return false;
+  }
+}
+
+module.exports = {
+  parseVersion,
+  isNewer,
+  pickInstallerAsset,
+  describeUpdate,
+  isAllowedUpdateUrl,
+  isInsideDir,
+  UPDATE_HOSTS,
+  MAX_UPDATE_BYTES,
+};
