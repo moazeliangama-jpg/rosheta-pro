@@ -1,4 +1,11 @@
 # إعدادات تغليف نسخة سطح المكتب — روشتة برو
+#
+# الفكرة: الملف اللي بيطلع من هنا هو **كل اللي الجهاز محتاجه**.
+# المثبّت بيفترض إن الجهاز فاضي تمامًا (مفيش Node، مفيش Chromium، مفيش أي حاجة)،
+# والبرنامج بيجهّز نفسه بنفسه أول ما يفتح.
+#
+# الحماية: كل كود البرنامج بيتحول لـ app.asar، وبتتشغّل مفاتيح Electron (fuses)
+# اللي بتمنع تشغيل كود خارجي/متعدّل، وبتشفّر كوكيز الجلسة على القرص.
 appId: com.roshettapro.app
 productName: Roshetta Pro
 copyright: Roshetta Pro
@@ -7,16 +14,20 @@ directories:
   output: release
   buildResources: build
 
-# تجميع التطبيق في ملف واحد داخل المثبّت
+# كل كود البرنامج في أرشيف واحد (مش ملفات مفتوحة على القرص)
 asar: true
+# ضغط أقصى: مثبّت أصغر
+compression: maximum
 
 files:
   - dist/**/*
   - electron/**/*
   - build/icon.png
   - package.json
-  # الواجهة ملف واحد وكل اعتمادياتها مدمجة؛ نمنع node_modules لتصغير المثبت كثيرًا.
+  # الواجهة ملف واحد وكل اعتمادياتها مدمجة → مفيش node_modules خالص
   - "!node_modules/**/*"
+  - "!**/*.map"
+  - "!**/*.md"
 
 extraMetadata:
   main: electron/main.cjs
@@ -24,22 +35,54 @@ extraMetadata:
   description: نظام تحليل استمارات نايس دير — روشتة برو
   author: Roshetta Pro
 
+# ---------------------------------------------------------------------------
+# مفاتيح الحماية (electron-fuses) — بتتقفل جوه الملف التنفيذي نفسه
+# ---------------------------------------------------------------------------
+electronFuses:
+  # يمنع تشغيل البرنامج كمحرك Node لتنفيذ كود خارجي
+  runAsNode: false
+  # يشفّر كوكيز جلسة نايس دير على القرص
+  enableCookieEncryption: true
+  # يمنع حقن NODE_OPTIONS
+  enableNodeOptionsEnvironmentVariable: false
+  # يمنع فتح وضع --inspect والتلاعب في التشغيل
+  enableNodeCliInspectArguments: false
+  # أي تعديل بايت واحد في app.asar يمنع التشغيل
+  enableEmbeddedAsarIntegrityValidation: true
+  # ممنوع تحميل كود من خارج الأرشيف
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: true
+
 win:
   icon: build/icon.png
+  # البرنامج مش محتاج صلاحية مسؤول وقت التشغيل — التثبيت بس
+  requestedExecutionLevel: asInvoker
   target:
-    - nsis
-    - portable
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: RoshettaPro-${version}-${arch}.${ext}
 
-# مثبّت Windows واحد يحوي كل شيء
+# ---------------------------------------------------------------------------
+# المثبّت: تثبيت لكل مستخدمي الجهاز (بيطلب صلاحية مسؤول مرة واحدة)،
+# اختصارات على سطح المكتب وقائمة ابدأ، وبيشغّل البرنامج بعد التثبيت.
+# ---------------------------------------------------------------------------
 nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
+  oneClick: true
+  perMachine: true
+  allowElevation: true
+  runAfterFinish: true
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: روشتة برو
+  uninstallDisplayName: روشتة برو
+  # بيانات المستخدم (القرارات/الصور/اللوج) بتفضل بعد إلغاء التثبيت
+  deleteAppDataOnUninstall: false
+  include: installer.nsh
   artifactName: RoshettaPro-Setup-${version}.${ext}
 
-# نسخة محمولة بدون تثبيت (اختيارية)
+# نسخة محمولة (اختيارية) — بتشتغل من فلاشة بدون تثبيت
 portable:
   artifactName: RoshettaPro-Portable-${version}.${ext}

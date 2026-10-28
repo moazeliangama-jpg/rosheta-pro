@@ -31,6 +31,9 @@ jobs:
       - name: Snippets check
         run: npm run check:snippets
 
+      - name: Packaging config
+        run: npm run check:packaging
+
       - name: Electron syntax
         run: |
           node --check electron/main.cjs
