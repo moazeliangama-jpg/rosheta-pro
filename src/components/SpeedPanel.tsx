@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { Activity, Download, FolderOpen, Gauge, Timer, TrendingDown } from "lucide-react";
 import { useAppStore } from "../lib/store";
 import { STEP_LABEL, STEP_ORDER, bottleneck, slowestSabs, summarize } from "../lib/metrics";
+import { hourlySummary } from "../lib/hourly";
 import { hasDesktopBridge, bridge } from "../lib/provider";
 import { Badge, Button, Card, SectionTitle } from "./ui";
 
@@ -11,6 +12,7 @@ import { Badge, Button, Card, SectionTitle } from "./ui";
  */
 export function SpeedPanel({ compact = false }: { compact?: boolean }) {
   const steps = useAppStore((s) => s.steps);
+  const hourly = useAppStore((s) => s.hourly);
   const session = useAppStore((s) => s.session);
   const logLine = useAppStore((s) => s.logLine);
 
@@ -18,6 +20,8 @@ export function SpeedPanel({ compact = false }: { compact?: boolean }) {
   const bn = useMemo(() => bottleneck(steps), [steps]);
   const slow = useMemo(() => slowestSabs(steps, compact ? 5 : 10), [steps, compact]);
   const total = stats.reduce((n, s) => n + s.count, 0);
+  // ١١٢) سرعة السيرفر حسب الساعة — بتتبني على أسبوع من القياس الحقيقي
+  const hours = hourlySummary(hourly);
 
   const exportCsv = async () => {
     if (!steps.length) return;
@@ -86,6 +90,14 @@ export function SpeedPanel({ compact = false }: { compact?: boolean }) {
                 );
               })}
             </div>
+
+            {hours.best ? (
+              <div className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-1.5 text-[10px] text-white/50">
+                أفضل ساعة للتشغيل: <span className="text-emerald-300">{hours.best.hour}:00</span> (متوسط {hours.best.avg} مللي) ·
+                أبطأ ساعة: <span className="text-amber-300">{hours.worst?.hour}:00</span> (متوسط {hours.worst?.avg} مللي) ·
+                من {hours.hours} ساعة مقاسة
+              </div>
+            ) : null}
 
             {slow.length ? (
               <div className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">

@@ -23,6 +23,8 @@ import { bridge, hasDesktopBridge } from "../lib/provider";
 import { Badge, Button, Card, Field, SectionTitle, Toggle } from "../components/ui";
 
 import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
+import { DevicePanel } from "../components/DevicePanel";
+import { WorkspacePanel } from "../components/WorkspacePanel";
 import { cn, nowTime } from "../lib/utils";
 
 export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages: () => void }) {
@@ -137,6 +139,8 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           </div>
         </Card>
       ) : null}
+
+      <DevicePanel />
 
       {/* 1) نايس دير */}
       <Card>
@@ -412,6 +416,24 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
               label="تصدير تقرير الجلسة تلقائيًا"
               hint="إكسل توقيت الخطوات + أبطأ السابات في آخر الجلسة"
             />
+            <Toggle
+              checked={settings.onlyNewForms}
+              onChange={(v) => setSettings({ onlyNewForms: v })}
+              label="جلسة «الجديد فقط»"
+              hint="بيجيب صور الاستمارات اللي ظهرت النهاردة بس — مش اللي اشتغلت عليها قبل كده"
+            />
+            <Toggle
+              checked={settings.debugMode}
+              onChange={(v) => setSettings({ debugMode: v })}
+              label="وضع التشخيص"
+              hint="بيحفظ لقطة HTML عند فشل قراءة الجدول (مفيد لو نايس دير غيّر الصفحة)"
+            />
+            <Toggle
+              checked={settings.compactMode}
+              onChange={(v) => setSettings({ compactMode: v })}
+              label="وضع الشاشة الصغيرة"
+              hint="واجهة أضيق وأخف للابتوب"
+            />
             <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
               <div className="text-xs text-white/50">الحد اليومي للرسائل</div>
               <input
@@ -465,6 +487,8 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           </p>
         ) : null}
       </Card>
+
+      <WorkspacePanel />
 
       {/* 4) واتساب */}
       <Card>

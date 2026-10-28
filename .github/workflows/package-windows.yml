@@ -1,0 +1,55 @@
+name: Package Windows EXE
+
+# المثبّت النهائي (EXE) بيتولد هنا على جهاز Windows حقيقي.
+# التشغيل يدوي من تبويب Actions، أو تلقائيًا مع أي وسم إصدار (tag) زي v1.0.0.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # هنا بننزّل Electron الحقيقي (البناء لازمه) — بعكس مهمة الاختبارات
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Snippets check
+        run: npm run check:snippets
+
+      - name: Packaging config
+        run: npm run check:packaging
+
+      - name: Build renderer
+        run: npm run build
+
+      # يبني RoshettaPro-Setup-*.exe (مثبّت) + RoshettaPro-Portable-*.exe
+      - name: Build installer
+        run: npx electron-builder --win --publish never
+
+      - name: List artifacts
+        run: dir release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roshetta-pro-windows
+          path: |
+            release/*.exe
+            release/*.yml
+          if-no-files-found: error
+          retention-days: 30

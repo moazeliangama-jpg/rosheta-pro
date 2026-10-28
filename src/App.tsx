@@ -119,6 +119,17 @@ export default function App() {
     }
   };
 
+  /** ١٢٣) زرار واحد: أعد كل الصور الفاشلة (بدون ما تلمس اللي نجح) */
+  const retryAllFailed = async () => {
+    if (!bridges) return;
+    logLine("info", "إعادة محاولة كل الصور المتعثرة…");
+    try {
+      await new SessionEngine(onTick).retryAllFailed();
+    } catch (err) {
+      logLine("error", `فشل إعادة المحاولة: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const rescanSab = async (sab: string) => {
     const st = useAppStore.getState();
     const patient = st.patients.find((p) => p.sab === sab);
@@ -173,7 +184,10 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
   }
 
   return (
-    <div className="min-h-screen bg-[#05090a] text-white" dir="rtl">
+    <div
+      className={settings.compactMode ? "min-h-screen bg-[#05090a] text-[13px] text-white" : "min-h-screen bg-[#05090a] text-white"}
+      dir="rtl"
+    >
       <div className="pointer-events-none fixed inset-0 opacity-60 [background:radial-gradient(900px_400px_at_80%_-10%,rgba(13,148,136,0.18),transparent),radial-gradient(700px_300px_at_10%_110%,rgba(16,185,129,0.12),transparent)]" />
 
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#05090a]/85 backdrop-blur">
@@ -220,7 +234,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
         </div>
       </header>
 
-      <main className="relative mx-auto max-w-[1500px] px-4 py-4">
+      <main className={settings.compactMode ? "relative mx-auto max-w-[1200px] px-2 py-2" : "relative mx-auto max-w-[1500px] px-4 py-4"}>
         {screen === "setup" ? (
           <SetupScreen
             onScan={() => startEngine({ fresh: true, scan: true, images: false })}
@@ -233,6 +247,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
             onResume={() => engine?.resume()}
             onStop={() => void engine?.stop()}
             onDecision={() => setScreen("decision")}
+            onRetryFailed={() => void retryAllFailed()}
           />
         ) : null}
         {screen === "decision" ? <DecisionScreen onRetry={retryOne} onRescanSab={rescanSab} /> : null}

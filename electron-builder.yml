@@ -1,4 +1,11 @@
 # إعدادات تغليف نسخة سطح المكتب — روشتة برو
+#
+# الفكرة: الملف اللي بيطلع من هنا هو **كل اللي الجهاز محتاجه**.
+# المثبّت بيفترض إن الجهاز فاضي تمامًا (مفيش Node، مفيش Chromium، مفيش أي حاجة)،
+# والبرنامج بيجهّز نفسه بنفسه أول ما يفتح (app:preflight).
+#
+# الحماية: الكود بيتحول لـ app.asar، وبتتشغّل مفاتيح Electron (fuses) اللي
+# بتمنع تحميل أي كود غير موقّع/متعدّل، وبتشفّر كوكيز الجلسة على القرص.
 appId: com.roshettapro.app
 productName: Roshetta Pro
 copyright: Roshetta Pro
@@ -7,8 +14,10 @@ directories:
   output: release
   buildResources: build
 
-# تجميع التطبيق في ملف واحد داخل المثبّت
+# كل كود البرنامج في أرشيف واحد (مش ملفات مفتوحة على القرص)
 asar: true
+# ضغط أقصى: مثبّت أصغر
+compression: maximum
 
 files:
   - dist/**/*
@@ -17,6 +26,8 @@ files:
   - package.json
   # الواجهة ملف واحد وكل اعتمادياتها مدمجة؛ نمنع node_modules لتصغير المثبت كثيرًا.
   - "!node_modules/**/*"
+  - "!**/*.map"
+  - "!**/*.md"
 
 extraMetadata:
   main: electron/main.cjs
@@ -24,22 +35,54 @@ extraMetadata:
   description: نظام تحليل استمارات نايس دير — روشتة برو
   author: Roshetta Pro
 
+# ---------------------------------------------------------------------------
+# حماية الكود والبيانات (مفاتيح Electron الرسمية)
+# • onlyLoadAppFromAsar + enableEmbeddedAsarIntegrityValidation:
+#   أي تعديل في app.asar → البرنامج بيرفض يشتغل (مش بيعدّي بصمت).
+# • enableCookieEncryption: كوكيز جلسات نايس دير/واتساب مشفّرة على القرص.
+# • runAsNode / NODE_OPTIONS / --inspect: مقفولة — مفيش حقن كود من برّه.
+# ---------------------------------------------------------------------------
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  # الواجهة بتتحمّل من file:// داخل الأرشيف، فبنسبها زي ما هي
+  grantFileProtocolExtraPrivileges: true
+
 win:
   icon: build/icon.png
+  requestedExecutionLevel: asInvoker
   target:
-    - nsis
-    - portable
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  artifactName: RoshettaPro-${version}-${arch}.${ext}
 
-# مثبّت Windows واحد يحوي كل شيء
+# ---------------------------------------------------------------------------
+# المثبّت: تثبيت لكل مستخدمي الجهاز (بيطلب صلاحية مسؤول مرة واحدة)،
+# بيجهّز الاختصارات، وبيشغّل البرنامج بعد التثبيت عشان يجهّز نفسه.
+# مفيش أي متطلبات سابقة: Chromium وNode وكل الاعتماديات جوه الملف.
+# ---------------------------------------------------------------------------
 nsis:
-  oneClick: false
-  perMachine: false
-  allowToChangeInstallationDirectory: true
-  createDesktopShortcut: true
+  oneClick: true
+  perMachine: true
+  allowElevation: true
+  runAfterFinish: true
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: روشتة برو
+  uninstallDisplayName: روشتة برو
+  deleteAppDataOnUninstall: false
+  include: installer.nsh
   artifactName: RoshettaPro-Setup-${version}.${ext}
 
-# نسخة محمولة بدون تثبيت (اختيارية)
+# نسخة محمولة (اختيارية) — بتشتغل من فلاشة بدون تثبيت
 portable:
   artifactName: RoshettaPro-Portable-${version}.${ext}

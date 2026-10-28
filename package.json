@@ -10,7 +10,11 @@
     "start": "electron .",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/build-tests.mjs && node --test \"scripts/.tests/*.mjs\" \"scripts/*.test.mjs\"",
-    "check:snippets": "node scripts/check-snippets.mjs"
+    "check:snippets": "node scripts/check-snippets.mjs",
+    "dist": "npm run build && electron-builder --win --publish never",
+    "dist:dir": "npm run build && electron-builder --win --dir --publish never",
+    "dist:portable": "npm run build && electron-builder --win portable --publish never",
+    "check:packaging": "node scripts/check-packaging.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",

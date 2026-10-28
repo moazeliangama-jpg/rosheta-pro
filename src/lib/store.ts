@@ -13,7 +13,11 @@ import type {
   SpeedSample,
   StepSample,
   Verdict,
+  HourStat,
+  Profile,
 } from "./types";
+import type { Bundle } from "./bundle";
+import { applyDecision, applySabDecision, undoDecision, type DecisionEntry } from "./decisions";
 import type { SabCacheEntry } from "./prepare";
 import { saveImage } from "./imageStore";
 import { dateKey, uid } from "./utils";
@@ -23,6 +27,8 @@ import { putCachedImage } from "./imageCache";
 export { defaultSettings };
 
 export type Screen = "setup" | "run" | "decision" | "results";
+
+export type DecisionHistory = DecisionEntry;
 
 
 
@@ -92,6 +98,14 @@ interface AppState {
   steps: StepSample[];
   /** كاش جرد اليوم: ساب اتجرد النهاردة مش بيتجرد تاني */
   sabCache: Record<string, SabCacheEntry>;
+  /** أول يوم ظهرت فيه كل استمارة — أساس جلسة «الجديد فقط» */
+  seenForms: Record<string, string>;
+  /** متوسط سرعة السيرفر لكل ساعة (٠–٢٣) — بيتبني على أسبوع */
+  hourly: Record<string, HourStat>;
+  /** آخر القرارات (للتراجع) — الأحدث الأول */
+  history: DecisionHistory[];
+  /** مواقع عمل وإعدادات جاهزة للتبديل */
+  profiles: Record<string, Profile>;
   outreach: OutreachMessage[];
   screen: Screen;
   viewerId: string | null;
@@ -110,6 +124,19 @@ interface AppState {
   setRxStatus: (id: string, rx: RxImage) => void;
   setImage: (id: string, dataUrl: string, method?: string) => void;
   setHasDrugs: (id: string, value: Verdict) => void;
+  /** ١٠٥) قرار جماعي لكل استمارات الساب — بيرجع عدد الاستمارات المتأثرة */
+  setSabDecision: (sab: string, value: Verdict) => number;
+  /** ١٠٦) تراجع عن آخر قرار */
+  undoLastDecision: () => DecisionHistory | null;
+  clearHistory: () => void;
+  /** ١٠٨) تدوير صورة الاستمارة */
+  setRotation: (id: string, deg: number) => void;
+  markSeen: (ids: string[], day: string) => void;
+  addHourSample: (hour: number, ms: number) => void;
+  saveProfile: (name: string) => void;
+  applyProfile: (name: string) => boolean;
+  deleteProfile: (name: string) => void;
+  importBundle: (bundle: Bundle) => void;
   upsertMonthly: (checks: MonthlyCheck[]) => void;
   setMonthlyConfirmed: (sab: string, value: "available" | "unavailable" | null) => void;
   addFailed: (rec: FailedRecord) => void;
@@ -210,6 +237,10 @@ export const useAppStore = create<AppState>()(
       samples: [],
       steps: [],
       sabCache: {},
+      seenForms: {},
+      hourly: {},
+      history: [],
+      profiles: {},
       outreach: [],
       screen: "setup",
       viewerId: null,
@@ -231,6 +262,7 @@ export const useAppStore = create<AppState>()(
           steps: [],
           outreach: [],
           viewerId: null,
+          history: [],
           session: { ...emptySession },
         }),
 
@@ -301,10 +333,127 @@ export const useAppStore = create<AppState>()(
 
       setHasDrugs: (id, value) =>
         set((s) => {
+          // ١٠٦) بنحفظ القرار القديم عشان نقدر نتراجع
+          const res = applyDecision(s.cases, id, value);
+          if (!res.entry) return s;
+          return { cases: res.cases, history: [res.entry, ...s.history].slice(0, 60) };
+        }),
+
+      /** ١٠٥) قرار واحد لكل استمارات الساب — القرار في الصرف بيبقى للساب كله */
+      setSabDecision: (sab, value) => {
+        const res = applySabDecision(get().cases, sab, value);
+        if (!res.entries.length) return 0;
+        set({ cases: res.cases, history: [...res.entries, ...get().history].slice(0, 60) });
+        return res.entries.length;
+      },
+
+      undoLastDecision: () => {
+        const s = get();
+        const last = s.history[0];
+        if (!last) return null;
+        set({ history: s.history.slice(1), cases: undoDecision(s.cases, last) });
+        return last;
+      },
+
+      clearHistory: () => set({ history: [] }),
+
+      setRotation: (id, deg) =>
+        set((s) => {
           const prev = s.cases[id];
           if (!prev) return s;
-          return { cases: { ...s.cases, [id]: { ...prev, hasDrugs: value, updatedAt: Date.now() } } };
+          const rotation = ((Math.round(deg / 90) * 90) % 360 + 360) % 360;
+          return { cases: { ...s.cases, [id]: { ...prev, rotation } } };
         }),
+
+      markSeen: (ids, day) =>
+        set((s) => {
+          const seenForms = { ...s.seenForms };
+          let changed = false;
+          for (const id of ids) {
+            if (!seenForms[id]) {
+              seenForms[id] = day;
+              changed = true;
+            }
+          }
+          return changed ? { seenForms } : s;
+        }),
+
+      addHourSample: (hour, ms) =>
+        set((s) => {
+          const key = String(((hour % 24) + 24) % 24);
+          const prev = s.hourly[key] ?? { count: 0, totalMs: 0 };
+          if (!Number.isFinite(ms) || ms <= 0) return s;
+          return { hourly: { ...s.hourly, [key]: { count: prev.count + 1, totalMs: prev.totalMs + Math.round(ms) } } };
+        }),
+
+      saveProfile: (name) =>
+        set((s) => {
+          const clean = name.trim();
+          if (!clean) return s;
+          return {
+            profiles: {
+              ...s.profiles,
+              [clean]: {
+                name: clean,
+                workplace: s.settings.workplace,
+                payerId: s.settings.payerId,
+                payerName: s.settings.payerName,
+                validityDays: s.settings.validityDays,
+                workerChoice: s.settings.workerChoice,
+                turboMode: s.settings.turboMode,
+                messageDrugs: s.settings.messageDrugs,
+                messageMonthly: s.settings.messageMonthly,
+              },
+            },
+          };
+        }),
+
+      applyProfile: (name) => {
+        const s = get();
+        const p = s.profiles[name];
+        if (!p) return false;
+        s.setSettings({
+          workplace: p.workplace,
+          payerId: p.payerId,
+          payerName: p.payerName,
+          validityDays: p.validityDays,
+          workerChoice: p.workerChoice,
+          turboMode: p.turboMode,
+          messageDrugs: p.messageDrugs,
+          messageMonthly: p.messageMonthly,
+        });
+        return true;
+      },
+
+      deleteProfile: (name) =>
+        set((s) => {
+          const profiles = { ...s.profiles };
+          delete profiles[name];
+          return { profiles };
+        }),
+
+      importBundle: (bundle) => {
+        const s = get();
+        const cases: Record<string, CaseRecord> = {};
+        const caseOrder: string[] = [];
+        for (const c of bundle.cases) {
+          cases[c.id] = c;
+          caseOrder.push(c.id);
+        }
+        const monthly: Record<string, MonthlyCheck> = {};
+        for (const m of bundle.monthly ?? []) monthly[m.sab] = m;
+        set({
+          settings: { ...s.settings, ...(bundle.settings ?? {}), niceDeerPass: s.settings.niceDeerPass },
+          patients: bundle.patients ?? s.patients,
+          cases,
+          caseOrder,
+          monthly,
+          outreach: bundle.outreach ?? s.outreach,
+          seenForms: bundle.seenForms ?? s.seenForms,
+          hourly: bundle.hourly ?? s.hourly,
+          history: [],
+        });
+      },
 
       upsertMonthly: (checks) =>
         set((s) => {
@@ -384,6 +533,10 @@ export const useAppStore = create<AppState>()(
           lastDecisionId: null,
           steps: [],
           sabCache: {},
+          seenForms: {},
+          hourly: {},
+          history: [],
+          profiles: {},
           niceDeerLoggedIn: false,
         }),
 

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Download, ImageOff, Loader2, Maximize2, Minus, Plus, RotateCcw, X } from "lucide-react";
+import { AlertTriangle, Download, ImageOff, Loader2, Maximize2, Minus, Plus, RotateCcw, RotateCw, X } from "lucide-react";
 import type { CaseRecord } from "../lib/types";
 import { Badge, Button } from "./ui";
 import { cn } from "../lib/utils";
 import { downloadImage } from "../lib/excel";
 import { getCachedImage, getImage } from "../lib/imageCache";
+import { useAppStore } from "../lib/store";
 
 export const SOURCE_LABEL: Record<string, string> = {
   "pre-approval": "Pre-Approval",
@@ -142,6 +143,7 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
         alt={`روشتة ${c.sab} — ${c.reference}`}
         onLoad={() => setDrawn(true)}
         onError={() => setBroken(true)}
+        style={{ transform: `rotate(${c.rotation ?? 0}deg)` }}
         className={cn("h-full w-full object-contain transition-opacity duration-200", drawn ? "opacity-100" : "opacity-0")}
         draggable={false}
       />
@@ -167,12 +169,18 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
   const { src, loading } = useRxSrc(c);
   const [zoom, setZoom] = useState(1);
   const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
+  const setRotation = useAppStore((s) => s.setRotation);
+  // ١٠٨) الصورة بتترسم على canvas وقت الالتقاط وChromium بيطبّق EXIF Orientation
+  // تلقائيًا؛ لو الصورة طلعت مايلة (مسح ضوئي قديم) الزرارين دول بيلفّوها وبتتحفظ.
+  const rotation = ((c.rotation ?? 0) % 360 + 360) % 360;
+  const rotate = (delta: number) => setRotation(c.id, rotation + delta);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
       if (e.key === "+" || e.key === "=") setZoom((z) => Math.min(4, z + 0.25));
       if (e.key === "-") setZoom((z) => Math.max(0.5, z - 0.25));
+      if (e.key.toLowerCase() === "r") rotate(e.shiftKey ? -90 : 90);
     };
     window.addEventListener("keydown", onKey);
     document.body.style.overflow = "hidden";
@@ -180,7 +188,7 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = "";
     };
-  }, [onClose]);
+  }, [onClose, rotation]);
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#04090b]/95 backdrop-blur" dir="rtl">
@@ -205,6 +213,12 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
           <Button size="sm" variant="ghost" onClick={() => setZoom(1)} aria-label="الحجم الطبيعي">
             <Maximize2 className="h-4 w-4" />
           </Button>
+          <Button size="sm" variant="ghost" onClick={() => rotate(90)} aria-label="تدوير يمين">
+            <RotateCw className="h-4 w-4" />
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => rotate(-90)} aria-label="تدوير شمال">
+            <RotateCcw className="h-4 w-4" />
+          </Button>
           <Button size="sm" variant="ghost" disabled={!src} onClick={() => src && downloadImage(src, `${c.sab}-${c.reference}`)}>
             <Download className="h-4 w-4" /> تنزيل
           </Button>
@@ -226,7 +240,13 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
               src={src}
               alt={`${c.sab}`}
               onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-              style={{ width: `${Math.round(zoom * 100)}%`, maxWidth: zoom <= 1 ? "820px" : "none" }}
+              style={{
+                width: `${Math.round(zoom * 100)}%`,
+                maxWidth: zoom <= 1 ? "820px" : "none",
+                // ١٠٨) التدوير محفوظ مع الاستمارة (بيتطبّق على الصورة الأصلية)
+                transform: `rotate(${rotation}deg)`,
+                transition: "transform 120ms ease-out",
+              }}
               className="rounded-lg bg-white shadow-2xl"
               draggable={false}
             />
@@ -246,7 +266,7 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
       </div>
 
       <div className="border-t border-white/10 px-4 py-2 text-center text-[11px] text-white/35">
-        Esc للإغلاق • + / - للتكبير
+        Esc للإغلاق • + / - للتكبير • R للتدوير (Shift+R عكس الاتجاه)
       </div>
     </div>
   );

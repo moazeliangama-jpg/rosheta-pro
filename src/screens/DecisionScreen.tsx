@@ -11,6 +11,7 @@ import {
   ImageIcon,
   Pill,
   RefreshCw,
+  RotateCcw,
   Search,
   Send,
   ShieldCheck,
@@ -22,12 +23,13 @@ import { progressSummary } from "../lib/eligibility";
 import type { CaseRecord, MonthlyCheck } from "../lib/types";
 import { Badge, Button, Card, EmptyState, SectionTitle, Stat } from "../components/ui";
 import { RxImage, RxLightbox, SOURCE_LABEL } from "../components/RxViewer";
+import { SabDrugsView } from "../components/SabDrugsView";
 import { cn } from "../lib/utils";
 type ExcelModule = typeof import("../lib/excel");
 // مكتبة الإكسل بتتحمّل وقت التصدير بس — فتح البرنامج أسرع بكتير
 const excel = () => import("../lib/excel") as Promise<ExcelModule>;
 
-type Tab = "all" | "undecided" | "drugs" | "nodrugs" | "failed" | "invalid";
+type Tab = "all" | "undecided" | "drugs" | "sabdrugs" | "nodrugs" | "failed" | "invalid";
 
 export function DecisionScreen({
   onRetry,
@@ -42,6 +44,9 @@ export function DecisionScreen({
   const viewerId = useAppStore((s) => s.viewerId);
   const setViewer = useAppStore((s) => s.setViewer);
   const setHasDrugs = useAppStore((s) => s.setHasDrugs);
+  const setSabDecision = useAppStore((s) => s.setSabDecision);
+  const undoLastDecision = useAppStore((s) => s.undoLastDecision);
+  const history = useAppStore((s) => s.history);
   const setMonthlyConfirmed = useAppStore((s) => s.setMonthlyConfirmed);
   const setScreen = useAppStore((s) => s.setScreen);
   const settings = useAppStore((s) => s.settings);
@@ -53,6 +58,7 @@ export function DecisionScreen({
   const [tab, setTab] = useState<Tab>("undecided");
   const [query, setQuery] = useState("");
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
+  const [undoNote, setUndoNote] = useState("");
   const [showMonthly, setShowMonthly] = useState(true);
 
   const all = useMemo(() => orderedCases(caseOrder, cases), [caseOrder, cases]);
@@ -67,6 +73,7 @@ export function DecisionScreen({
         case "undecided":
           return c.valid && c.hasDrugs === null;
         case "drugs":
+        case "sabdrugs":
           return c.hasDrugs === "available";
         case "nodrugs":
           return c.hasDrugs === "unavailable";
@@ -79,6 +86,45 @@ export function DecisionScreen({
       }
     });
   }, [all, query, tab]);
+
+  /**
+   * ١٠٥) تجميع استمارات كل ساب: القرار في الصرف بيبقى للساب كله،
+   * فبنعرض الساب الواحد مرة واحدة بعدد استماراته والمحسوم منها.
+   */
+  const sabGroups = useMemo(() => {
+    const map = new Map<
+      string,
+      { sab: string; name: string; phone: string; total: number; decided: number; withDrugs: number; ids: string[] }
+    >();
+    for (const c of all) {
+      if (!c.valid) continue;
+      let g = map.get(c.sab);
+      if (!g) {
+        g = { sab: c.sab, name: c.patientName, phone: c.phone, total: 0, decided: 0, withDrugs: 0, ids: [] };
+        map.set(c.sab, g);
+      }
+      g.total += 1;
+      g.ids.push(c.id);
+      if (c.hasDrugs !== null) g.decided += 1;
+      if (c.hasDrugs === "available") g.withDrugs += 1;
+    }
+    return [...map.values()].sort((a, b) => b.total - b.decided - (a.total - a.decided));
+  }, [all]);
+
+  const decideSab = (sab: string, value: "available" | "unavailable") => {
+    const n = setSabDecision(sab, value);
+    logLine("ok", `قرار جماعي على ساب ${sab}: ${value === "available" ? "بها دواء" : "بدون دواء"} — ${n} استمارة.`);
+  };
+
+  const undo = () => {
+    const last = undoLastDecision();
+    if (!last) {
+      logLine("warn", "مفيش قرار للتراجع عنه.");
+      return;
+    }
+    setUndoNote(`تم التراجع عن قرار ساب ${last.sab} — رجع «${last.prev === "available" ? "بها دواء" : last.prev === "unavailable" ? "بدون دواء" : "غير محدد"}».`);
+    setTimeout(() => setUndoNote(""), 4000);
+  };
 
   const viewer = viewerId ? cases[viewerId] ?? null : null;
   const lastDecisionId = useAppStore((s) => s.lastDecisionId);
@@ -103,6 +149,11 @@ export function DecisionScreen({
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        undo();
+        return;
+      }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const current = viewerId ? cases[viewerId] : null;
       if (e.key === "1" && current) {
@@ -152,17 +203,85 @@ export function DecisionScreen({
         <Stat label="متعثرة" value={stats.failed} tone="bad" />
       </div>
 
+      {undoNote ? (
+        <div className="rounded-xl border border-teal-500/25 bg-teal-500/10 px-4 py-2 text-xs text-teal-200">
+          {undoNote}
+        </div>
+      ) : null}
+
       {stats.failed > 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3">
           <div className="flex items-center gap-2 text-sm text-amber-200">
             <AlertTriangle className="h-4 w-4 shrink-0" />
             {stats.failed} استمارة صورتها لسه مش متاحة — كل واحدة بعلامة حمراء وسببها وزرار إعادة الجلب.
           </div>
-          <Button size="sm" variant="ghost" onClick={() => void retryAllFailed()}>
-            <RefreshCw className="h-3.5 w-3.5" /> إعادة جلب الكل
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* ١٠٦) تراجع عن آخر قرار */}
+            <Button size="sm" variant="ghost" onClick={undo} disabled={!history.length}>
+              <RotateCcw className="h-3.5 w-3.5" /> تراجع (Ctrl+Z)
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void retryAllFailed()}>
+              <RefreshCw className="h-3.5 w-3.5" /> إعادة جلب الكل
+            </Button>
+          </div>
         </div>
       ) : null}
+
+      {/* ١٠٥) قرار جماعي لكل استمارات الساب */}
+      <Card>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <SectionTitle hint={`${sabGroups.length} ساب`}>قرار جماعي للساب — استماراته كلها مرة واحدة</SectionTitle>
+          {history.length ? (
+            <Button size="sm" variant="ghost" onClick={undo}>
+              <RotateCcw className="h-3.5 w-3.5" /> تراجع عن آخر قرار
+            </Button>
+          ) : null}
+        </div>
+        {sabGroups.length === 0 ? (
+          <EmptyState title="مفيش استمارات داخل المدة" body="ابدأ الجرد من شاشة الإعداد أولًا." />
+        ) : (
+          <div className="max-h-72 overflow-auto rounded-xl border border-white/10">
+            <table className="w-full text-right text-xs">
+              <thead className="sticky top-0 bg-[#0f1b1e] text-white/50">
+                <tr>
+                  <th className="px-3 py-2 font-medium">الساب</th>
+                  <th className="px-3 py-2 font-medium">الاسم</th>
+                  <th className="px-3 py-2 font-medium">استمارات</th>
+                  <th className="px-3 py-2 font-medium">محسوم</th>
+                  <th className="px-3 py-2 font-medium">بها دواء</th>
+                  <th className="px-3 py-2 font-medium">القرار الجماعي</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sabGroups.map((g) => (
+                  <tr key={g.sab} className="border-t border-white/5">
+                    <td className="px-3 py-1.5 tabular-nums text-white/80">{g.sab}</td>
+                    <td className="max-w-[160px] truncate px-3 py-1.5 text-white/70">{g.name || "—"}</td>
+                    <td className="px-3 py-1.5 tabular-nums text-white/70">{g.total}</td>
+                    <td className="px-3 py-1.5 tabular-nums text-white/50">
+                      {g.decided}/{g.total}
+                    </td>
+                    <td className="px-3 py-1.5 tabular-nums text-emerald-300">{g.withDrugs || "—"}</td>
+                    <td className="px-3 py-1.5">
+                      <div className="flex flex-wrap gap-1">
+                        <Button size="sm" variant="success" onClick={() => decideSab(g.sab, "available")}>
+                          <Pill className="h-3 w-3" /> الكل بها دواء
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => decideSab(g.sab, "unavailable")}>
+                          <CircleSlash className="h-3 w-3" /> الكل بدون
+                        </Button>
+                        <Button size="sm" variant="muted" onClick={() => setViewer(g.ids[0])}>
+                          عرض الاستمارات
+                        </Button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       {/* الشهري */}
       <Card>
@@ -245,6 +364,7 @@ export function DecisionScreen({
                 ["all", "الكل"],
                 ["undecided", "لم يُحسم"],
                 ["drugs", "بها دواء"],
+                ["sabdrugs", "ساب بها دواء"],
                 ["nodrugs", "بدون دواء"],
                 ["failed", "متعثر"],
                 ["invalid", "خارج المدة"],
@@ -282,7 +402,9 @@ export function DecisionScreen({
           </span>
         </div>
 
-        {filtered.length === 0 ? (
+        {tab === "sabdrugs" ? (
+          <SabDrugsView cases={cases} query={query} onOpen={(id) => setViewer(id)} />
+        ) : filtered.length === 0 ? (
           <div className="p-4">
             <EmptyState
               title="مفيش نتائج بالفلتر الحالي"

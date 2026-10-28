@@ -1,6 +1,15 @@
 # روشتة برو — نسخة سطح المكتب (Windows EXE)
 
-## الطريقة الأسهل (على جهاز ويندوز)
+## الجهاز اللي بيتثبّت عليه — مش محتاج أي حاجة
+
+ملف الـ EXE **قائم بذاته**: جواه محرك Chromium وNode وكل ملفات البرنامج.
+الجهاز المستهدف مش محتاج Node.js ولا .NET ولا Chromium ولا أي مكتبة — التثبيت بيجهّز كل حاجة
+(مجلد التثبيت، الاختصارات، مجلد البيانات `%APPDATA%\Roshetta Pro`، وقاعدة جدار الحماية)،
+والبرنامج بيكمّل التجهيز بنفسه أول تشغيل عبر فحص `app:preflight`.
+
+## الطريقة الأسهل للبناء (على جهاز ويندوز للمطوّر)
+
+> Node.js مطلوب **على جهاز البناء بس** — مش على جهاز المستخدم.
 
 1. ثبّت **Node.js** من [https://nodejs.org](https://nodejs.org) (نسخة LTS).
    - للتشغيل المباشر من غير تثبيت: دبل-كليك على **`start.bat`** (يثبّت الحزم ويبني ويشغّل).
@@ -34,9 +43,26 @@
 
 ```bash
 npm install
-npm run build
-npx electron-builder --win nsis portable --config electron-builder.yml
+npm run check:packaging   # يتأكد من إعدادات المثبّت والأيقونة قبل البناء
+npm run dist              # = build + electron-builder --win (nsis + portable)
 ```
+
+أو من غير جهاز ويندوز عندك: شغّل وركفلو **Package Windows EXE** من تبويب Actions في GitHub
+(أو اعمل tag زي `v1.0.0`) — المثبّت بيتولد على ويندوز حقيقي وينزل كـ Artifact.
+
+## حماية ملفات البرنامج
+
+- الكود كله بيتحول لـ **`app.asar`** — مش ملفات مفتوحة يقدر أي حد يعدّلها.
+- **electronFuses** بتتقفل في الملف التنفيذي نفسه:
+  - `runAsNode: false` — ممنوع تشغيل البرنامج كمحرك Node لتنفيذ كود خارجي.
+  - `onlyLoadAppFromAsar: true` — ممنوع تحميل كود من خارج الأرشيف.
+  - `enableEmbeddedAsarIntegrityValidation: true` — أي تعديل بايت واحد في الأرشيف بيمنع التشغيل.
+  - `enableNodeOptionsEnvironmentVariable / enableNodeCliInspectArguments: false` — ممنوع حقن `NODE_OPTIONS` أو فتح Inspect.
+  - `enableCookieEncryption: true` — كوكيز جلسة نايس دير مشفّرة على القرص.
+- بيانات المستخدم (القرارات والصور واللوج) بتفضل في `%APPDATA%\Roshetta Pro` ومش بتتمسح مع إلغاء التثبيت.
+
+> ملاحظة: الحماية دي بتمنع تعديل كود البرنامج وتشغيل نسخة معدّلة. التوقيع الرقمي (Authenticode)
+> مش مضبوط هنا لأنه محتاج شهادة مدفوعة منك — لو ضفتها للـ Secrets بيتفعّل توقيع الملف تلقائيًا.
 
 > على لينكس/ماك: بناء ملف Windows يتطلب تثبيت `wine`، أو استخدم `./build-exe.sh` لبناء نسخة لنظامك الحالي.
 
