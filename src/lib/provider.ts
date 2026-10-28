@@ -146,7 +146,6 @@ export interface RoshettaBridge {
       notes?: string[];
     }>
   >;
-  deleteForm: (p: { sab: string; reference: string; source: string; payerId: string; payerName: string }) => Promise<BridgeResult>;
   logoutNiceDeer: () => Promise<BridgeResult>;
   openSearchSite: () => Promise<BridgeResult>;
   wa: {
@@ -158,6 +157,10 @@ export interface RoshettaBridge {
     openChat: (p: { phone: string; text?: string }) => Promise<BridgeResult>;
   };
   closeAll: () => Promise<boolean>;
+  /** كتابة ملف تصدير على القرص فعلاً وبرجوع مساره (مش تنزيل مبهم) */
+  saveFile: (p: { name: string; base64?: string; text?: string }) => Promise<
+    BridgeResult<{ file: string; bytes: number; name: string; dir: string }>
+  >;
   openExportFolder: () => Promise<BridgeResult<{ dir: string }>>;
   notify: (p: { title: string; body: string }) => Promise<BridgeResult>;
   openExternal: (url: string) => Promise<boolean>;

@@ -998,22 +998,30 @@ export class SessionEngine {
       // تصدير تقرير الجلسة تلقائيًا (اختياري من الإعدادات)
       if (this.settings().autoExport) {
         const st = useAppStore.getState();
-        void import("./excel").then((x) => {
-          x.exportSessionReport({
+        void import("./excel").then(async (x) => {
+          const report = await x.exportSessionReport({
             cases: Object.values(st.cases),
             failed: st.failed,
             samples: st.samples,
             sessionMs: Date.now() - this.startedAt,
             steps: st.steps,
           });
+          if (report.ok) {
+            st.logLine("ok", `تقرير التشغيل اتحفظ: ${report.name ?? report.file}`);
+          } else {
+            st.logLine("error", `تعذر حفظ تقرير التشغيل: ${report.error ?? "سبب غير معروف"}`);
+          }
           // ٩١) إكسل المتعثرين بيتولد لوحده لو فيه تعثرات
           if (st.failed.length) {
-            x.exportFailed(st.failed, {
+            const failedFile = await x.exportFailed(st.failed, {
               "مدة التشغيل": `${Math.round((Date.now() - this.startedAt) / 60000)} دقيقة`,
               "عدد الاستمارات": Object.keys(st.cases).length,
               "صور جاهزة": this.images,
               "متعثرة": this.failures,
             });
+            if (!failedFile.ok) {
+              st.logLine("error", `تعذر حفظ إكسل المتعثرين: ${failedFile.error ?? "سبب غير معروف"}`);
+            }
           }
         });
       }

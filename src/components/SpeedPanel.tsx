@@ -26,8 +26,12 @@ export function SpeedPanel({ compact = false }: { compact?: boolean }) {
   const exportCsv = async () => {
     if (!steps.length) return;
     const x = await import("../lib/excel");
-    const n = x.exportStepsCsv(steps);
-    logLine("ok", `تم تصدير توقيت ${n} خطوة إلى CSV.`);
+    const res = await x.exportStepsCsv(steps);
+    if (!res.ok) {
+      logLine("error", `فشل تصدير CSV: ${res.error ?? "سبب غير معروف"}`);
+      return;
+    }
+    logLine("ok", `اتحفظ توقيت ${res.count} خطوة في: ${res.file ?? res.name}`);
   };
 
   const openFolder = async () => {

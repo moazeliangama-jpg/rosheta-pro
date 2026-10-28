@@ -108,6 +108,23 @@ export function downloadBlob(blob: Blob, filename: string) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
+/** حالة الإرجاع (Delete) بالنص العربي — «غير مؤكد» حالة حقيقية مش نجاح */
+export const DELETE_STATE_LABEL: Record<string, string> = {
+  done: "تم",
+  background: "في الخلفية",
+  queued: "في الانتظار",
+  running: "بيتنفذ",
+  skipped: "متخطى",
+  unverified: "غير مؤكد",
+  error: "فشل",
+  "not-found": "الزرار مش موجود",
+};
+
+export const deleteLabel = (state: string | undefined) => {
+  const key = String(state ?? "");
+  return DELETE_STATE_LABEL[key] ?? key;
+};
+
 export function safeName(s: string) {
   return String(s ?? "").replace(/[\\/:*?"<>|]+/g, "-").slice(0, 60);
 }

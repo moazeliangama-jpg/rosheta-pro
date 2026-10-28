@@ -848,14 +848,18 @@ async function runDeleteJob(job) {
           // تأكيد حقيقي: بنستنى انتهاء الطلب ونقرأ نتيجة الصفحة بدل الافتراض
           await run(win, S.WAIT_AJAX_IDLE_SCRIPT(5000));
           const outcome = await run(win, S.DELETE_OUTCOME_SCRIPT);
-          return outcome === "error" ? "error" : "done";
+          // «تم» ما تتقالش غير بتأكيد. لو الصفحة ما أكدتش، الحالة "unverified"
+          // وبتتعاد مرة واحدة — مش بنحسبها نجاح على أمل إنها نجحت.
+          if (outcome === "confirmed") return "done";
+          if (outcome === "error") return "error";
+          return "unverified";
         }
         return "not-found";
       },
       1500,
     );
     deleteResults.set(job.key, { state, at: Date.now(), ms: Date.now() - started });
-    if (state === "error" || state === "not-found") {
+    if (state === "error" || state === "not-found" || state === "unverified") {
       if (!job.retried) deleteRetry.set(job.key, { ...job, retried: true });
     }
   } catch (err) {
@@ -2257,21 +2261,70 @@ ipcMain.handle("app:notify", async (_e, payload) => {
 });
 
 /** فتح مجلد التنزيلات اللي فيه ملفات الإكسل */
+/** مجلد التصدير: كل ملف بيكتبه البرنامج بيتحفظ هنا وبيرجّع مساره للمستخدم */
+const exportDir = () => path.join(app.getPath("downloads"), "Roshetta Pro");
+
+const EXPORT_EXT = new Set(["xlsx", "csv", "json", "png", "jpg", "pdf"]);
+
 ipcMain.handle("app:open-export-folder", async () => {
-  const dir = app.getPath("downloads");
-  const err = await shell.openPath(dir);
+  const dir = exportDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* لو مش قادر ينشئه، بنفتح التنزيلات */
+  }
+  const err = await shell.openPath(fs.existsSync(dir) ? dir : app.getPath("downloads"));
   return { ok: !err, dir, error: err || undefined };
 });
 
-ipcMain.handle("nd:delete", async (_e, payload) => {
-  const { sab, reference, href } = payload || {};
-  if (!sab || !reference) return { ok: false, error: "الساب والرقم المرجعي مطلوبين" };
-  const candidates = [];
-  if (href) candidates.push(href.startsWith("http") ? href : `${BASE}${href}`);
-  if (!candidates.length) return { ok: false, error: "مفيش صفحة استمارة معروفة للإرجاع" };
-  const key = `${sab}::${reference}::manual`;
-  enqueueDelete({ key, candidates });
-  return { ok: true, key };
+/**
+ * كتابة ملف تصدير حقيقي على القرص.
+ *
+ * ليه مش تنزيل متصفح؟ لأن التنزيل بيسيب الملف في مجلد مبهم ومفيش تأكيد إنه
+ * اتكتب فعلًا. هنا بنكتب، بنقرا الحجم بعد الكتابة، وبنرجّع المسار للمستخدم.
+ */
+ipcMain.handle("app:save-file", async (_e, payload) => {
+  try {
+    const rawName = String(payload?.name || "").trim();
+    const base64 = String(payload?.base64 || "");
+    const text = typeof payload?.text === "string" ? payload.text : "";
+    if (!rawName) return { ok: false, error: "اسم الملف مطلوب" };
+    if (!base64 && !text) return { ok: false, error: "مفيش بيانات للكتابة" };
+
+    const ext = (rawName.split(".").pop() || "").toLowerCase();
+    if (!EXPORT_EXT.has(ext)) return { ok: false, error: `صيغة غير مسموحة: ${ext || "بدون امتداد"}` };
+
+    let bytes;
+    if (base64) {
+      bytes = Buffer.from(base64, "base64");
+    } else {
+      bytes = Buffer.from(text, "utf8");
+    }
+    if (!bytes.length) return { ok: false, error: "الملف فاضي" };
+    if (bytes.length > 32 * 1024 * 1024) return { ok: false, error: "الملف أكبر من ٣٢ ميجا" };
+
+    const safe = rawName.replace(/[\\/:*?"<>|]/g, "_").slice(0, 120);
+    const dir = exportDir();
+    fs.mkdirSync(dir, { recursive: true });
+
+    // الاسم المكرر بياخد رقم بدل ما يكتب فوق ملف قديم
+    const dot = safe.lastIndexOf(".");
+    const stem = dot > 0 ? safe.slice(0, dot) : safe;
+    const suffix = dot > 0 ? safe.slice(dot) : "";
+    let file = path.join(dir, safe);
+    for (let i = 2; fs.existsSync(file) && i < 500; i += 1) {
+      file = path.join(dir, `${stem} (${i})${suffix}`);
+    }
+
+    fs.writeFileSync(file, bytes);
+    const size = fs.statSync(file).size;
+    if (!size) return { ok: false, error: "الملف اتكتب بحجم صفر" };
+
+    appendLog("info", `تصدير: ${path.basename(file)} (${Math.round(size / 1024)} ك.ب)`);
+    return { ok: true, data: { file, bytes: size, name: path.basename(file), dir } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 });
 
 ipcMain.handle("nd:logout-everything", async () => {
@@ -2356,8 +2409,15 @@ ipcMain.handle("wa:send", async (_e, payload) => {
 
   const url = `https://web.whatsapp.com/send?phone=${encodeURIComponent(phone)}&text=${encodeURIComponent(body)}`;
   await safeLoad(win, url, 40000);
-  const res = await run(win, S.WA_SEND_SCRIPT);
-  return res && res.ok ? { ok: true, ms: res.ms } : { ok: false, error: (res && res.error) || "فشل الإرسال" };
+  const res = await run(win, S.WA_SEND_SCRIPT(body));
+  // النجاح مش بيتقال غير لما الرسالة تبان فعلًا في المحادثة
+  if (res && res.ok && res.verified) return { ok: true, ms: res.ms, verified: true };
+  return {
+    ok: false,
+    verified: false,
+    reason: (res && res.reason) || "unverified",
+    error: (res && res.error) || "فشل الإرسال — مش متأكد إن الرسالة وصلت",
+  };
 });
 
 ipcMain.handle("wa:replies", async (_e, payload) => {

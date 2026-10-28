@@ -5,6 +5,7 @@ import { Badge, Button } from "./ui";
 import { cn } from "../lib/utils";
 import { downloadImage } from "../lib/excel";
 import { getCachedImage, getImage } from "../lib/imageCache";
+import { reportSave } from "../lib/saveFeedback";
 import { useAppStore } from "../lib/store";
 
 export const SOURCE_LABEL: Record<string, string> = {
@@ -221,7 +222,18 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
           <Button size="sm" variant="ghost" onClick={() => rotate(-90)} aria-label="تدوير شمال">
             <RotateCcw className="h-4 w-4" />
           </Button>
-          <Button size="sm" variant="ghost" disabled={!src} onClick={() => src && downloadImage(src, `${c.sab}-${c.reference}`)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={!src}
+            onClick={() =>
+              void (src
+                ? downloadImage(src, `${c.sab}-${c.reference}`).then((res) =>
+                    reportSave(res, "تنزيل صورة الروشتة"),
+                  )
+                : Promise.resolve(null))
+            }
+          >
             <Download className="h-4 w-4" /> تنزيل
           </Button>
           <Button size="sm" variant="danger" onClick={onClose} aria-label="إغلاق">

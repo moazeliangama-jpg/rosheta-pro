@@ -4,6 +4,7 @@ import { Button, Card, EmptyState } from "./ui";
 import { groupCasesBySab, type SabGroup } from "../lib/decisions";
 import type { CaseRecord } from "../lib/types";
 import { cn } from "../lib/utils";
+import { reportSave } from "../lib/saveFeedback";
 
 type ExcelModule = typeof import("../lib/excel");
 const excel = () => import("../lib/excel") as Promise<ExcelModule>;
@@ -48,7 +49,7 @@ export function SabDrugsView({
     });
 
   const exportSab = (g: SabGroup & { rows: CaseRecord[] }) => {
-    void excel().then((x) => x.exportWithDrugs(g.rows));
+    void excel().then(async (x) => reportSave(await x.exportWithDrugs(g.rows), `تصدير ساب ${g.sab}`));
   };
 
   if (!groups.length) {
@@ -72,7 +73,9 @@ export function SabDrugsView({
           size="sm"
           variant="ghost"
           onClick={() =>
-            void excel().then((x) => x.exportWithDrugs(groups.flatMap((g) => g.rows)))
+            void excel().then(async (x) =>
+              reportSave(await x.exportWithDrugs(groups.flatMap((g) => g.rows)), "تصدير كل السابات"),
+            )
           }
         >
           <FileSpreadsheet className="h-3.5 w-3.5" /> تصدير الكل
