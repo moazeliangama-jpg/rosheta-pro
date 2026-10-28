@@ -1034,6 +1034,14 @@ function setupResourceBlocking(ses) {
  * الفلترة بقت على المضيف الحقيقي (SEC) — الدومينات اللي بتشبه الاسم بتترفض،
  * وبروتوكولات زي file: و ms-msdt: مش بتتفتح خالص.
  */
+/**
+ * هل الرابط ده صفحة روشتة فعلية؟ (صفحة الصور أو فتح المطالبة)
+ * بنستخدمه عشان ما نعتبرش لقطة صفحة البحث «صورة روشتة» — دي كانت هتخلي
+ * البرنامج يعرض صورة غلط بدل ما يقول إن الصورة ماجاتش.
+ */
+const PRESCRIPTION_URL_RE = /PrescriptionImgs|Prescription|OpenClaim/i;
+const isPrescriptionUrl = (url) => PRESCRIPTION_URL_RE.test(String(url || ""));
+
 const DEFAULT_POPUP_HANDLER = ({ url }) => {
   if (SEC.isSafeExternalUrl(url) && !SEC.isNiceDeerUrl(url)) void shell.openExternal(url);
   return { action: "deny" };
@@ -2019,9 +2027,11 @@ async function fetchSource(win, url, { referrer } = {}) {
     }
   }
 
-  // ٢) طبقة الشبكة في نفس الجلسة (بتشتغل مع مضيفين تانيين)
+  // ٢) طبقة الشبكة في **نفس جلسة النافذة** (مش جلسة الدخول المشتركة).
+  // كل نافذة معزولة ليها كوكيز وسيرفر-سايد سشن مستقلين؛ الجلب بجلسة تانية
+  // بيرجّع صفحة دخول بدل الصورة، وده كان بيخلي «الصورة مش بتظهر».
   try {
-    const ses = session.fromPartition(ND_PARTITION);
+    const ses = (win && !win.isDestroyed() && wc(win)?.session) || session.fromPartition(ND_PARTITION);
     if (typeof ses.fetch !== "function") return null;
     const res = await ses.fetch(url, {
       credentials: "include",
@@ -2238,12 +2248,19 @@ function armPopupCapture(win, ref = "") {
   };
 
   // نافذة الروشتة بتتفتح من **محتوى** الصفحة (مش من شريط المتصفح)
+  //
+  // **جلسة النافذة المنبثقة لازم تكون جلسة النافذة اللي فتحتها** (`__rpPartition`).
+  // قبل كده كانت بتتفتح على `ND_PARTITION` المشتركة: لو الدخول حصل في جلسة النافذة
+  // المعزولة (وده اللي بيحصل بعد العزل)، النافذة المنبثقة بتطلع صفحة دخول —
+  // يعني «مفيش صورة روشتة» من غير أي رسالة خطأ مفهومة.
   wc(win).setWindowOpenHandler(({ url }) => {
     urls.push(url);
     capLog(ref, `نافذة صورة مطلوبة: ${String(url).slice(0, 160)}`);
+    const popupOptions = hiddenWindowOptions({ show: false });
+    popupOptions.webPreferences.partition = win.__rpPartition || ND_PARTITION;
     return {
       action: "allow",
-      overrideBrowserWindowOptions: hiddenWindowOptions({ show: false }),
+      overrideBrowserWindowOptions: popupOptions,
     };
   });
 
@@ -2265,14 +2282,34 @@ function armPopupCapture(win, ref = "") {
 
   const onChild = (child) => {
     child.webContents.setUserAgent(UA);
+    // جلسة النافذة دي = جلسة اللي فتحتها (عشان نتعرّف على نوافذنا وقت الالتقاط)
+    child.__rpPartition = win.__rpPartition || ND_PARTITION;
+    // النافذة دي هي «نافذة الروشتة» — عنوانها بيقول للمستخدم هي بتعمل إيه
+    labelWindow(child, ref ? `روشتة ${ref.split("::").pop()}` : "روشتة");
     // الصورة لازم الصفحة تترسم: بنعرضها في الخلفية لحظة الالتقاط وبعدها بتتقفل
     presentInBackground(child, 0);
     void (async () => {
+      let captured = false;
       try {
         const image = await grab(child, "نافذة منبثقة");
-        if (image) settle(image);
+        if (image) {
+          captured = true;
+          settle(image);
+        }
       } finally {
-        if (!child.isDestroyed()) child.destroy();
+        // لو الصورة اتجابت: النافذة اتقفلت فورًا (الشغل مستمر).
+        // لو ماجاتش: النافذة تفضل **ظاهرة** دقيقة كاملة عشان المستخدم يشوف
+        // الروشتة بعينه ويعرف إن المشكلة في القراءة/اللقطة مش في فتح الروشتة.
+        if (!child.isDestroyed()) {
+          if (captured) child.destroy();
+          else setTimeout(() => {
+            try {
+              if (!child.isDestroyed()) child.destroy();
+            } catch {
+              /* تجاهل */
+            }
+          }, 60000);
+        }
       }
     })();
   };
@@ -2287,11 +2324,13 @@ function armPopupCapture(win, ref = "") {
     async adoptExisting() {
       if (settled) return null;
       const self = win.id;
+      const myPartition = win.__rpPartition || ND_PARTITION;
       const candidates = BrowserWindow.getAllWindows().filter((w) => {
         if (!w || w.isDestroyed() || w.id === self) return false;
+        // **نفس جلسة الساب** بس — نافذة ساب تاني مش بتاعتنا
+        if ((w.__rpPartition || ND_PARTITION) !== myPartition) return false;
         try {
-          const url = contentOf(w)?.getURL() || "";
-          return /PrescriptionImgs|Prescription|Beneficiary\/Prescription/i.test(url);
+          return isPrescriptionUrl(contentOf(w)?.getURL() || "");
         } catch {
           return false;
         }
@@ -2319,8 +2358,64 @@ function armPopupCapture(win, ref = "") {
   };
 }
 
-/** يفتح رابط صورة في نافذة التقاط معاد استخدامها */
-async function captureFromUrl(url, referrer, ref = "") {
+/**
+ * يفتح رابط صورة الروشتة في نافذة التقاط **بنفس جلسة النافذة اللي طلبتها**.
+ *
+ * ليه الجلسة مهمة؟ لأن رابط `PrescriptionImgs` بيشتغل بجلسة السيرفر بتاعت
+ * النافذة اللي فتحته. أي نافذة تانية (أو جلسة تانية) بترجع صفحة دخول —
+ * وده بالظبط سبب «البرنامج مش عارف يعرض صورة الروشتة».
+ *
+ * الترتيب: جلب مباشر بنفس الجلسة (أسرع) → نافذة حقيقية بنفس الـpartition →
+ * جلب من الشبكة عبر نفس الجلسة.
+ */
+async function captureFromUrl(url, referrer, ref = "", sourceWin = null) {
+  const partition = (sourceWin && sourceWin.__rpPartition) || null;
+
+  // ١) جلب مباشر بنفس جلسة النافذة — من غير فتح أي نافذة
+  if (sourceWin && !sourceWin.isDestroyed()) {
+    const direct = await fetchImageViaSession(sourceWin, url, { referrer });
+    if (direct && direct.dataUrl) {
+      capLog(ref, `جلب بنفس جلسة النافذة: نجح (${direct.method})`);
+      return direct;
+    }
+  }
+
+  // ٢) نافذة التقاط حقيقية بنفس الـpartition (كوكيز الساب نفسه)
+  if (partition) {
+    const win = createBrowserWindow({
+      partition,
+      title: ref ? `روشتة ${ref}` : "روشتة",
+      index: 1,
+    });
+    try {
+      win.__rpPartition = partition;
+      presentInBackground(win, 1);
+      setResourceMode(win, "images");
+      const loaded = await safeLoad(win, url, TIMEOUTS.pageLoad, referrer);
+      if (loaded !== "error") {
+        const shot = await captureImageInWindow(win, { timeoutMs: TIMEOUTS.image });
+        if (shot && shot.dataUrl) {
+          capLog(ref, `نافذة التقاط بنفس الجلسة: نجح (${shot.method})`);
+          return shot;
+        }
+      }
+      const net = await fetchImageViaSession(win, url, { referrer });
+      if (net && net.dataUrl) {
+        capLog(ref, `شبكة بنفس الجلسة: نجح (${net.method})`);
+        return net;
+      }
+      capLog(ref, "نافذة التقاط بنفس الجلسة: فشل (مفيش صورة مقروءة)");
+    } finally {
+      try {
+        if (!win.isDestroyed()) win.destroy();
+      } catch {
+        /* تجاهل */
+      }
+    }
+    return null;
+  }
+
+  // ٣) من غير نافذة مصدر: نافذة التقاط من الحوض (لما الجلسة مش معروفة)
   return captures.with(async (win) => {
     let shot = null;
     const loaded = await safeLoad(win, url, TIMEOUTS.pageLoad, referrer);
@@ -2410,6 +2505,11 @@ async function processForm(win, job) {
           tick();
         });
         if (!nav || win.isDestroyed()) return null;
+        // صفحة الروشتة بس — صفحة البحث فيها لوجو كبير وكان ممكن يتعرض كأنه روشتة
+        if (!isPrescriptionUrl(nav)) {
+          capLog(ref, `تنقّل لصفحة مش روشتة: ${String(nav).slice(0, 120)}`);
+          return null;
+        }
         await waitForLoad(win, 12000);
         return captureImageInWindow(win, { timeoutMs: 6000 });
       })();
@@ -2419,6 +2519,7 @@ async function processForm(win, job) {
       const inlinePromise = (async () => {
         await sleep(250);
         if (win.isDestroyed()) return null;
+        if (!isPrescriptionUrl(wc(win).getURL())) return null;
         const res = await run(win, S.captureNewImageScript({ timeoutMs: 7000 }));
         if (res && res.srcUrl) {
           capLog(ref, "صورة روشتة ظهرت جوه الصفحة — بجيبها من الشبكة بنفس الجلسة");
@@ -2438,6 +2539,17 @@ async function processForm(win, job) {
     }
 
     // شبكة: نفس الجلسة والكوكيز — بتنجح لما الصفحة نفسها مش قابلة للرسم
+    // صورة مصدرها صفحة البحث أو صفحة الدخول = مش روشتة (لوجو/أيقونة) — تترفض
+    if (
+      image &&
+      image.dataUrl &&
+      image.src &&
+      /^https?:/i.test(image.src) &&
+      /Beneficiary\/Search|Account\/Login/i.test(String(image.src))
+    ) {
+      capLog(ref, `صورة مرفوضة: مصدرها صفحة مش روشتة (${String(image.src).slice(0, 120)})`);
+      image = null;
+    }
     if (!image || !image.dataUrl) {
       const candidates = [];
       if (navigatedTo) candidates.push(navigatedTo);
@@ -2450,6 +2562,8 @@ async function processForm(win, job) {
       }
       for (const url of candidates.slice(0, 4)) {
         if (!/^https?:\/\//i.test(url)) continue;
+        // أي رابط مش صفحة روشتة مابنجيبش منه — البحث فيه صور مش روشتات
+        if (!isPrescriptionUrl(url)) continue;
         if (tried.includes(url)) continue;
         tried.push(url);
         const net = await fetchImageViaSession(win, url, { referrer: SEARCH_URL });
@@ -2468,7 +2582,7 @@ async function processForm(win, job) {
       const link = await run(win, S.FIND_IMAGE_LINK_SCRIPT);
       if (link && link !== "click") {
         const abs = link.startsWith("http") ? link : `${BASE}${link}`;
-        image = await captureFromUrl(abs, wc(win).getURL(), ref);
+        image = await captureFromUrl(abs, wc(win).getURL(), ref, win);
         if (image) notes.push("التقاط من رابط صورة الروشتة");
       }
     }
@@ -2478,17 +2592,22 @@ async function processForm(win, job) {
     if (!image || !image.dataUrl) {
       const reason = image?.reason || image?.diag?.reason || "no-image";
       capLog(ref, `فشل نهائي (${reason}) — ${tried.length} رابط شبكة اتجرب`);
+      // دليل حقيقي: الصفحة اللي كانت مفتوحة + صورتها وقت الفشل (من غير أي بيانات دخول)
+      const evidence = await saveWindowEvidence(win, `image-${SEC.sanitizeSab(sab) || "sab"}-${reference}`);
+      const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
       return {
         ok: false,
-        error:
+        error: `${
           reason === "protected"
             ? "صورة الروشتة محمية من العرض — جرّب «الموقع في المتصفح» وافتح الروشتة يدويًا"
             : popup.urls.length
               ? "نافذة الروشتة اتفتحت لكن مفيش صورة مقروءة فيها"
-              : "مفيش صورة روشتة ظهرت بعد الضغط على الرقم المرجعي",
+              : "مفيش صورة روشتة ظهرت بعد الضغط على الرقم المرجعي"
+        }${files}`,
         reason,
         timings,
         popupUrls: popup.urls,
+        files: evidence,
       };
     }
 
