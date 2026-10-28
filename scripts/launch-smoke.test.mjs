@@ -40,6 +40,14 @@ function makeElectronStub() {
       setUserAgent: () => {},
       getURL: () => "about:blank",
       isLoadingMainFrame: () => false,
+      isLoading: () => false,
+      close: () => {},
+      navigationHistory: { canGoBack: () => false, canGoForward: () => false, goBack: () => {}, goForward: () => {} },
+      canGoBack: () => false,
+      canGoForward: () => false,
+      goBack: () => {},
+      goForward: () => {},
+      reload: () => {},
       capturePage: async () => ({ isEmpty: () => true, getSize: () => ({ width: 0, height: 0 }) }),
       isDestroyed: () => false,
       openDevTools: () => {},
@@ -56,6 +64,8 @@ function makeElectronStub() {
       this.webContents = webContents();
       this.id = Math.floor(Math.random() * 1e6);
       this.__events = new Map();
+      this.__children = [];
+      this.contentView = { addChildView: (view) => this.__children.push(view) };
     }
     static getAllWindows() {
       return [];
@@ -108,6 +118,9 @@ function makeElectronStub() {
     setBounds() {}
     getBounds() {
       return { x: 0, y: 0, width: 1000, height: 700 };
+    }
+    getContentSize() {
+      return [1000, 700];
     }
     setSkipTaskbar() {}
     setAlwaysOnTop() {}
@@ -164,9 +177,22 @@ function makeElectronStub() {
     dock: { hide: () => {} },
   };
 
+  // WebContentsView الحقيقي: المحتوى بيبقى webContents منفصل جوه النافذة
+  class FakeWebContentsView {
+    constructor(options = {}) {
+      this.options = options;
+      this.webContents = webContents();
+      this.bounds = null;
+    }
+    setBounds(bounds) {
+      this.bounds = bounds;
+    }
+  }
+
   const electron = {
     app,
     BrowserWindow: FakeBrowserWindow,
+    WebContentsView: FakeWebContentsView,
     ipcMain: {
       handle: (channel, fn) => {
         handled.push({ channel, fn });
@@ -204,7 +230,7 @@ function makeElectronStub() {
 }
 
 test("العملية الرئيسية بتحمّل من غير أخطاء وكل قنوات الـIPC بتتسجّل", async () => {
-  const { electron, handled } = makeElectronStub();
+  const { electron, handled, onEvents } = makeElectronStub();
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     if (request === "electron") return electron;
@@ -224,6 +250,10 @@ test("العملية الرئيسية بتحمّل من غير أخطاء وكل
   const channels = new Set(handled.map((h) => h.channel));
   for (const ch of ["nd:login", "nd:search", "nd:form-image", "app:preflight", "app:save-file", "wa:send"]) {
     assert.ok(channels.has(ch), `القناة ${ch} مش مسجّلة`);
+  }
+  // شريط المتصفح بيرسل أوامر بـipcMain.on (مش handle) — لازم يكون مسجّل
+  for (const ch of ["nd:chrome-action", "nd:chrome-ready"]) {
+    assert.ok(onEvents.includes(`ipc:${ch}`), `قناة شريط المتصفح ${ch} مش مسجّلة`);
   }
   // نسخة واحدة بس من كل قناة — التسجيل المكرر بيرمي في Electron
   const dupes = handled.map((h) => h.channel).filter((c, i, arr) => arr.indexOf(c) !== i);

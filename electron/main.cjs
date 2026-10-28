@@ -16,6 +16,7 @@
 const {
   app,
   BrowserWindow,
+  WebContentsView,
   ipcMain,
   session,
   shell,
@@ -397,7 +398,7 @@ async function run(win, code) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (!win || win.isDestroyed()) return null;
     try {
-      return await win.webContents.executeJavaScript(code, true);
+      return await wc(win).executeJavaScript(code, true);
     } catch (err) {
       const message = String(err && err.message ? err.message : err);
       const transient = /execution context|destroyed|navigat|script failed|render frame/i.test(message);
@@ -449,7 +450,7 @@ const STUCK_WINDOW_MS = 45000;
 async function runStrict(win, code) {
   if (!win || win.isDestroyed()) throw new Error("النافذة اتقفلت");
   try {
-    return await withTimeout(win.webContents.executeJavaScript(code, true), STUCK_WINDOW_MS, () => {
+    return await withTimeout(wc(win).executeJavaScript(code, true), STUCK_WINDOW_MS, () => {
       try {
         if (!win.isDestroyed()) win.destroy();
       } catch {
@@ -465,11 +466,12 @@ async function runStrict(win, code) {
 /** يستنى انتهاء تحميل الصفحة (حدث فعلي، مش polling) */
 /** تاريخ التصفح — واجهة Electron الجديدة أو القديمة */
 function navApi(win) {
-  const wc = win.webContents;
-  const nh = wc.navigationHistory;
+  const page = wc(win);
+  if (!page) return { canGoBack: () => false, goBack: () => {} };
+  const nh = page.navigationHistory;
   return {
-    canGoBack: () => (nh && typeof nh.canGoBack === "function" ? nh.canGoBack() : Boolean(wc.canGoBack && wc.canGoBack())),
-    goBack: () => (nh && typeof nh.goBack === "function" ? nh.goBack() : wc.goBack()),
+    canGoBack: () => (nh && typeof nh.canGoBack === "function" ? nh.canGoBack() : Boolean(page.canGoBack && page.canGoBack())),
+    goBack: () => (nh && typeof nh.goBack === "function" ? nh.goBack() : page.goBack()),
   };
 }
 
@@ -503,28 +505,30 @@ async function backToResults(win, steps = 3) {
 function waitForLoad(win, timeoutMs = TIMEOUTS.pageLoad) {
   return new Promise((resolve) => {
     if (!win || win.isDestroyed()) return resolve(false);
-    const wc = win.webContents;
-    if (!wc.isLoadingMainFrame()) return resolve(true);
+    const page = contentOf(win);
+    if (!page || !page.isLoadingMainFrame()) return resolve(true);
     let done = false;
     const finish = (value) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      wc.removeListener("did-stop-loading", onStop);
-      wc.removeListener("did-fail-load", onFail);
+      page.removeListener("did-stop-loading", onStop);
+      page.removeListener("did-fail-load", onFail);
       resolve(value);
     };
     const onStop = () => finish(true);
     const onFail = () => finish(false);
     const timer = setTimeout(() => finish(false), timeoutMs);
-    wc.once("did-stop-loading", onStop);
-    wc.once("did-fail-load", onFail);
+    page.once("did-stop-loading", onStop);
+    page.once("did-fail-load", onFail);
   });
 }
 
 async function safeLoad(win, url, timeoutMs = TIMEOUTS.pageLoad, referrer) {
   if (!win || win.isDestroyed()) return "error";
-  const load = (referrer ? win.loadURL(url, { httpReferrer: referrer }) : win.loadURL(url))
+  const page = contentOf(win);
+  if (!page) return "error";
+  const load = (referrer ? page.loadURL(url, { httpReferrer: referrer }) : page.loadURL(url))
     .then(() => "loaded")
     .catch((err) => (String(err?.message || err).includes("ERR_ABORTED") ? "loaded" : "error"));
   const timer = new Promise((resolve) => setTimeout(() => resolve("timeout"), timeoutMs));
@@ -574,6 +578,10 @@ function firstSuccess(promises, timeoutMs) {
 let backgroundWindows = true;
 
 const ND_WINDOW_PRELOAD = path.join(__dirname, "nd-window-preload.cjs");
+const CHROME_PRELOAD = path.join(__dirname, "browser-chrome-preload.cjs");
+const CHROME_HTML = path.join(__dirname, "browser-chrome.html");
+/** ارتفاع شريط المتصفح (العنوان + أزرار التنقّل) */
+const CHROME_HEIGHT = 46;
 
 function hiddenWindowOptions(extra = {}) {
   return {
@@ -653,17 +661,230 @@ function presentInBackground(win, index = 0) {
 }
 
 /**
- * عنوان النافذة = اللي بيتعمل فيها دلوقتي بالظبط. النافذة الحقيقية بتتعرف
- * من شريط المهام، فالعنوان هو اللي بيقول للمستخدم: النافذة دي على ساب إيه.
+ * عنوان النافذة + شريط المتصفح = اللي بيتعمل فيها دلوقتي بالظبط.
+ * النافذة الحقيقية بتتعرف من شريط المهام ومن شريط العنوان، فالاتنين بيتحدّثوا
+ * من نفس المصدر (الخطوة الجارية) — مش زينة.
  */
 function labelWindow(win, text) {
   if (!win || win.isDestroyed()) return;
+  const title = String(text || "").trim();
+  win.__rpLabel = title;
   try {
-    const title = String(text || "").trim();
     win.setTitle(title ? `روشتة برو — ${title}` : "روشتة برو — نايس دير");
   } catch {
     /* تجاهل */
   }
+  pushChromeState(win);
+}
+
+// ---------------------------------------------------------------------------
+// نافذة = متصفح حقيقي: شريط عنوان + أزرار تنقّل + محتوى معزول (WebContentsView)
+// ---------------------------------------------------------------------------
+
+/**
+ * محتوى الصفحة جوه النافذة.
+ *
+ * النافذة بقت حاوية فيها شريط متصفح فوق ومحتوى نايس دير تحته (WebContentsView).
+ * كل الأتمتة بتشتغل على المحتوى ده مش على النافذة نفسها. لو الـAPI مش متاح
+ * (نسخة Electron قديمة) بنرجع لـwebContents النافذة نفسه — نفس السلوك القديم.
+ */
+function contentOf(win) {
+  if (!win || win.isDestroyed()) return null;
+  const view = win.__rpView;
+  if (view && view.webContents && !view.webContents.isDestroyed()) return view.webContents;
+  return win.webContents;
+}
+
+/** اختصار شائع الاستخدام في كل كود الأتمتة */
+const wc = (win) => contentOf(win);
+
+let viewsSupported = null;
+/** هل WebContentsView متاح فعلًا في نسخة Electron دي؟ (بيتفحص مرة واحدة) */
+function canUseViews() {
+  if (viewsSupported !== null) return viewsSupported;
+  try {
+    if (typeof WebContentsView !== "function") {
+      viewsSupported = false;
+      return false;
+    }
+    const probe = new WebContentsView({ webPreferences: { partition: "persist:rp-probe" } });
+    try {
+      probe.webContents.close();
+    } catch {
+      /* تجاهل */
+    }
+    viewsSupported = true;
+  } catch (err) {
+    appendLog("warn", `إطار المتصفح مش متاح في نسخة Electron دي: ${err?.message || err}`);
+    viewsSupported = false;
+  }
+  return viewsSupported;
+}
+
+/** حالة شريط العنوان: الرابط الحقيقي، إمكانية الرجوع/التقدم، والتحميل */
+function pushChromeState(win) {
+  if (!win || win.isDestroyed() || !win.__rpView) return;
+  const content = win.__rpContent;
+  if (!content || content.isDestroyed()) return;
+  const nh = content.navigationHistory;
+  const canBack = () => {
+    try {
+      return nh && typeof nh.canGoBack === "function" ? nh.canGoBack() : Boolean(content.canGoBack && content.canGoBack());
+    } catch {
+      return false;
+    }
+  };
+  const canForward = () => {
+    try {
+      return nh && typeof nh.canGoForward === "function" ? nh.canGoForward() : Boolean(content.canGoForward && content.canGoForward());
+    } catch {
+      return false;
+    }
+  };
+  let onTop = false;
+  try {
+    onTop = win.isAlwaysOnTop();
+  } catch {
+    /* تجاهل */
+  }
+  const state = {
+    url: (() => {
+      try {
+        return content.getURL() || "about:blank";
+      } catch {
+        return "about:blank";
+      }
+    })(),
+    canGoBack: canBack(),
+    canGoForward: canForward(),
+    loading: (() => {
+      try {
+        return content.isLoading();
+      } catch {
+        return false;
+      }
+    })(),
+    label: win.__rpLabel || "",
+    onTop,
+  };
+  try {
+    win.webContents.send("nd:chrome-state", state);
+  } catch {
+    /* الشريط ممكن يكون لسه بيحمّل */
+  }
+}
+
+/** ربط أحداث المحتوى بشريط العنوان */
+function wireChrome(win) {
+  const content = win.__rpContent;
+  if (!content) return;
+  const push = () => pushChromeState(win);
+  for (const event of [
+    "did-start-loading",
+    "did-stop-loading",
+    "did-navigate",
+    "did-navigate-in-page",
+    "did-frame-finish-load",
+    "page-title-updated",
+  ]) {
+    content.on(event, push);
+  }
+  win.on("resize", () => {
+    layoutContent(win);
+    push();
+  });
+  ["maximize", "unmaximize", "enter-full-screen", "leave-full-screen", "restore"].forEach((event) =>
+    win.on(event, () => {
+      layoutContent(win);
+      push();
+    }),
+  );
+}
+
+/** مكان محتوى الصفحة تحت شريط المتصفح */
+function layoutContent(win) {
+  if (!win || win.isDestroyed() || !win.__rpView) return;
+  try {
+    const [width, height] = win.getContentSize();
+    win.__rpView.setBounds({
+      x: 0,
+      y: CHROME_HEIGHT,
+      width: Math.max(0, width),
+      height: Math.max(0, height - CHROME_HEIGHT),
+    });
+  } catch {
+    /* تجاهل */
+  }
+}
+
+/**
+ * نافذة متصفح حقيقية: إطار ويندوز + شريط عنوان وأزرار + محتوى في partition
+ * مستقل. العزل هنا مهم وظيفيًا: كل نافذة ليها كوكيز وجلسة سيرفر مختلفة،
+ * فنتائج بحث ساب مش بتتبهدل بنتائج ساب تاني بيتجرد في نفس اللحظة.
+ */
+function createBrowserWindow({ partition = ND_PARTITION, title = "روشتة برو — نايس دير", index = 0 } = {}) {
+  const bounds = backgroundBounds(index);
+  const useView = canUseViews();
+  const win = new BrowserWindow({
+    ...bounds,
+    show: false,
+    frame: true,
+    titleBarStyle: "default",
+    autoHideMenuBar: true,
+    backgroundColor: "#ffffff",
+    title,
+    webPreferences: useView
+      ? { preload: CHROME_PRELOAD, nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false }
+      : {
+          partition,
+          backgroundThrottling: false,
+          paintWhenInitiallyHidden: true,
+          preload: ND_WINDOW_PRELOAD,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          images: true,
+        },
+  });
+
+  if (useView) {
+    try {
+      const view = new WebContentsView({
+        webPreferences: {
+          partition,
+          backgroundThrottling: false,
+          paintWhenInitiallyHidden: true,
+          preload: ND_WINDOW_PRELOAD,
+          nodeIntegration: false,
+          contextIsolation: true,
+          sandbox: true,
+          images: true,
+        },
+      });
+      win.contentView.addChildView(view);
+      win.__rpView = view;
+      win.__rpContent = view.webContents;
+      layoutContent(win);
+      wireChrome(win);
+      win.loadFile(CHROME_HTML).catch(() => {
+        /* لو الشريط مش قادر يتحمّل، المحتوى شغال عادي */
+      });
+      win.on("closed", () => {
+        try {
+          if (win.__rpView && win.__rpContent && !win.__rpContent.isDestroyed()) win.__rpContent.close();
+        } catch {
+          /* تجاهل */
+        }
+        win.__rpView = null;
+        win.__rpContent = null;
+      });
+    } catch (err) {
+      appendLog("warn", `فشل إنشاء إطار المتصفح: ${err?.message || err} — نافذة عادية`);
+      win.__rpView = null;
+      win.__rpContent = null;
+    }
+  }
+  return win;
 }
 
 /**
@@ -709,7 +930,7 @@ async function saveWindowEvidence(win, tag) {
   }
   try {
     ensurePaintable(win);
-    const img = await win.webContents.capturePage();
+    const img = await wc(win).capturePage();
     if (img && !img.isEmpty()) {
       fs.writeFileSync(`${base}.png`, img.toPNG());
       files.png = `${base}.png`;
@@ -736,20 +957,23 @@ function ensurePaintable(win) {
 
 /** نوافذ ممنوع فيها تحميل الصور (صفحة البحث والإرجاع) — بتتقفل قبل فتح الروشتة */
 const noImageWindows = new Set();
-let webRequestReady = false;
+/** الجلسات اللي اتركّب عليها حاجب الموارد — كل نافذة ليها جلسة مستقلة */
+const blockedSessions = new WeakSet();
 
 function setResourceMode(win, mode) {
   if (!win || win.isDestroyed()) return;
-  const id = win.webContents.id;
-  if (mode === "images") noImageWindows.delete(id);
-  else noImageWindows.add(id);
+  const page = contentOf(win);
+  if (!page) return;
+  if (mode === "images") noImageWindows.delete(page.id);
+  else noImageWindows.add(page.id);
 }
 
-function setupResourceBlocking() {
-  if (webRequestReady) return;
-  webRequestReady = true;
+/** حجب الموارد بيتظبط لكل جلسة على حدة (كل نافذة ليها partition مستقل) */
+function setupResourceBlocking(ses) {
+  const nd = ses || session.fromPartition(ND_PARTITION);
+  if (!nd || blockedSessions.has(nd)) return;
+  blockedSessions.add(nd);
   try {
-    const nd = session.fromPartition(ND_PARTITION);
     nd.webRequest.onBeforeRequest((details, callback) => {
       const type = details.resourceType;
       // الخطوط والوسائط مش محتاجينها لا في البحث ولا في الروشتة
@@ -791,13 +1015,30 @@ class WindowPool {
   }
 
   create() {
-    setupResourceBlocking();
-    const win = new BrowserWindow({ ...hiddenWindowOptions(), title: `rp-${this.name}` });
-    win.webContents.setUserAgent(UA);
-    win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+    // كل نافذة ليها **جلسة (partition) خاصة**: كوكيز وتخزين منفصلين.
+    // من غير العزل ده، نوافذ بتجرد سابات مختلفة بتتقاسم نفس جلسة السيرفر،
+    // فنتائج ساب بتتبهدل بنتائج ساب تاني بيتجرد في نفس اللحظة.
+    const slot = this.windows.length + 1;
+    this.slotCounter = (this.slotCounter || 0) + 1;
+    const partition = `persist:nd-${this.name}-${((this.slotCounter - 1) % 12) + 1}`;
+    const win = createBrowserWindow({
+      partition,
+      title: `روشتة برو — نافذة ${this.name} #${slot}`,
+      index: this.windows.length,
+    });
+    win.__rpPartition = partition;
+    win.__rpPartitionFresh = !this.knownPartitions;
+    this.knownPartitions = this.knownPartitions || new Set();
+    win.__rpPartitionFresh = !this.knownPartitions.has(partition);
+    this.knownPartitions.add(partition);
+    const page = contentOf(win);
+    win.__rpContentId = page.id;
+    setupResourceBlocking(page.session);
+    page.setUserAgent(UA);
+    page.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
     win.__rpOps = 0;
     setResourceMode(win, this.blockImages ? "search" : "images");
-    labelWindow(win, `نافذة ${this.name} #${this.windows.length + 1}`);
+    labelWindow(win, `نافذة ${this.name} #${slot}`);
     // النافذة بتظهر في الخلفية (مرئية للموقع) — ده اللي بيخلي الدخول والتحقق يشتغلوا
     presentInBackground(win, this.windows.length);
     // منع تحويل أي نافذة لصفحة غير متوقعة (بيحصل مع redirects لصفحة الدخول)
@@ -806,7 +1047,7 @@ class WindowPool {
       if (i >= 0) this.windows.splice(i, 1);
       this.busy.delete(win);
       this.idleSince.delete(win);
-      if (!win.isDestroyed()) noImageWindows.delete(win.webContents.id);
+      if (!win.isDestroyed()) noImageWindows.delete(win.__rpContentId || 0);
     });
     this.windows.push(win);
     return win;
@@ -820,7 +1061,7 @@ class WindowPool {
     this.idleSince.delete(win);
     try {
       if (!win.isDestroyed()) {
-        noImageWindows.delete(win.webContents.id);
+        noImageWindows.delete(win.__rpContentId || 0);
         win.destroy();
       }
     } catch {
@@ -830,7 +1071,7 @@ class WindowPool {
 
   /** تقليل النوافذ الخاملة لما الذاكرة تقرب تخلص أو بعد فترة سكون */
   prune({ force = false } = {}) {
-    const free = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed());
+    const free = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed() && !(w.__rpSab && !w.__rpSabDone));
     const freeMemMb = os.freemem() / 1024 ** 2;
     const keep = force ? 0 : Math.min(free.length, 1);
     let removed = 0;
@@ -847,7 +1088,9 @@ class WindowPool {
   }
 
   async acquire(timeoutMs = 180000) {
-    const free = this.windows.find((w) => !this.busy.has(w) && !w.isDestroyed());
+    const ready = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed());
+    // نافذة فاضية و«حرة» الأول (مش شايلة ساب شغال) — العزل في الشغل مش في الشكل بس
+    const free = ready.find((w) => !(w.__rpSab && !w.__rpSabDone)) || ready[0];
     if (free) {
       this.busy.add(free);
       return free;
@@ -872,9 +1115,16 @@ class WindowPool {
   release(win) {
     this.busy.delete(win);
     if (!win || win.isDestroyed()) return;
-    // إعادة تدوير النافذة بعد عدد عمليات كبير: بتمنع تضخّم الذاكرة في الجلسات الطويلة
     win.__rpOps = (win.__rpOps || 0) + 1;
     this.idleSince.set(win, Date.now());
+    /**
+     * نافذة مربوطة بساب شغال: **ما تتقفلش** في نص العملية.
+     * السبب حقيقي مش شكلي: لو النافذة اتقفلت، نتائج بحث الساب بتضيع وكل
+     * استمارة بتفتح بحث جديد كامل — وده بالظبط اللي كان بيخلي الصرف بطيء
+     * وبيفصل «كل متصفح يمشي ساب واحد» لأن الساب بيقفز بين نوافذ.
+     */
+    if (win.__rpSab && !win.__rpSabDone) return;
+    // إعادة تدوير النافذة بعد عدد عمليات كبير: بتمنع تضخّم الذاكرة في الجلسات الطويلة
     if (win.__rpOps >= MAX_OPS_PER_WINDOW) {
       this.destroy(win);
       return;
@@ -1080,6 +1330,80 @@ function retryFailedDeletes() {
 }
 
 // ---------------------------------------------------------------------------
+// عزل الجلسات: نافذة = متصفح مستقل + نسخ كوكي الهوية بس
+// ---------------------------------------------------------------------------
+
+/** أسماء كوكيز الجلسة اللي لازم تفضل مستقلة لكل نافذة */
+const SESSION_COOKIE_RE = /session|sessid|jsessionid|phpsessid|asp\.net_session/i;
+
+/**
+ * نسخ **كوكي الهوية** (زي ASPXAUTH) من جلسة الدخول الأساسية لأي نافذة معزولة،
+ * مع ترك كوكي الجلسة (ASP.NET_SessionId وأمثاله) — فكل نافذة بتحصل على جلسة
+ * سيرفر جديدة مستقلة وبنفس الحساب.
+ *
+ * النتيجة: كل متصفح بيمشي خطوات ساب معيّن لوحده، ونتائج بحثه مش بتتبهدل
+ * بنتائج ساب تاني شغال في نفس اللحظة — وده كان أصل «تداخل المعلومات».
+ */
+async function copyAuthCookies(win) {
+  try {
+    const page = contentOf(win);
+    if (!page) return 0;
+    const source = session.fromPartition(ND_PARTITION);
+    const target = page.session;
+    if (!target || source === target) return 0;
+    let cookies = [];
+    try {
+      cookies = await source.cookies.get({ url: BASE });
+    } catch {
+      cookies = [];
+    }
+    let copied = 0;
+    for (const cookie of cookies) {
+      if (!cookie || !cookie.name) continue;
+      if (SESSION_COOKIE_RE.test(cookie.name)) continue;
+      const host = String(cookie.domain || "").replace(/^\./, "");
+      if (!host) continue;
+      try {
+        await target.cookies.set({
+          url: `https://${host}${cookie.path || "/"}`,
+          name: cookie.name,
+          value: cookie.value,
+          domain: cookie.domain,
+          path: cookie.path || "/",
+          secure: Boolean(cookie.secure),
+          httpOnly: Boolean(cookie.httpOnly),
+          sameSite: cookie.sameSite,
+          ...(cookie.expirationDate ? { expirationDate: cookie.expirationDate } : {}),
+        });
+        copied += 1;
+      } catch {
+        /* كوكي واحد مش مشكلة */
+      }
+    }
+    if (copied) capLog("session", `نافذة معزولة: اتنسخ ${copied} كوكي هوية من الجلسة الأساسية`);
+    return copied;
+  } catch {
+    return 0;
+  }
+}
+
+/** دخول النافذة المعزولة: ننسخ الهوية الأول، ولو ما نفعش ندخل ببيانات الحساب */
+async function loginIntoIsolatedWindow(win, credentials) {
+  const copied = await copyAuthCookies(win);
+  if (copied) {
+    await safeLoad(win, SEARCH_URL);
+    const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+    if (ok) return "shared-auth";
+  }
+  // دخول في جلسة النافذة نفسها — ولو السيرفر طلب تحقّق بشرى بنفسح لنافذة الدخول
+  await loginOnce(win, credentials);
+  // بعد أي دخول ناجح: نضمن إن الهوية موجودة في الجلسة المعزولة دي بالتحديد
+  await copyAuthCookies(win);
+  await safeLoad(win, SEARCH_URL);
+  return "logged-in";
+}
+
+// ---------------------------------------------------------------------------
 // تسجيل الدخول وصفحة البحث
 // ---------------------------------------------------------------------------
 
@@ -1151,27 +1475,23 @@ function liveStep(message, extra = {}) {
 
 function getLoginWindow() {
   if (loginWin && !loginWin.isDestroyed()) return loginWin;
-  loginWin = new BrowserWindow({
-    width: 1180,
-    height: 860,
-    show: false,
+  loginWin = createBrowserWindow({
+    partition: ND_PARTITION,
     title: "نايس دير — تسجيل الدخول",
-    autoHideMenuBar: true,
-    backgroundColor: "#ffffff",
-    webPreferences: {
-      partition: ND_PARTITION,
-      backgroundThrottling: false,
-      // نفس حماية النوافذ التانية: رسائل الموقع بتتسجل بدل ما تجمّد الصفحة
-      preload: ND_WINDOW_PRELOAD,
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      // الرسم لازم يشتغل عشان Cloudflare والتحقق البشري
-      paintWhenInitiallyHidden: true,
-    },
+    index: 0,
   });
-  loginWin.webContents.setUserAgent(UA);
-  loginWin.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+  try {
+    loginWin.setBounds({ width: 1180, height: 860 });
+    loginWin.center();
+  } catch {
+    /* تجاهل */
+  }
+  const page = contentOf(loginWin);
+  page.setUserAgent(UA);
+  page.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+  setupResourceBlocking(page.session);
+  loginWin.__rpContentId = page.id;
+  labelWindow(loginWin, "تسجيل الدخول");
   loginWin.on("closed", () => {
     loginWin = null;
   });
@@ -1224,7 +1544,7 @@ async function waitLoginState(win, wanted, timeoutMs) {
     if (last && wanted.includes(last.state)) return last;
     const loading = (() => {
       try {
-        return win.webContents.isLoadingMainFrame();
+        return wc(win).isLoadingMainFrame();
       } catch {
         return false;
       }
@@ -1510,8 +1830,7 @@ async function ensureSession(win, creds) {
   await safeLoad(win, SEARCH_URL);
   const after = await run(win, S.SESSION_CHECK_SCRIPT);
   if (after === "ok") return "ok";
-  await loginOnce(win, creds);
-  await safeLoad(win, SEARCH_URL);
+  await loginIntoIsolatedWindow(win, creds);
   return "relogin";
 }
 
@@ -1532,11 +1851,10 @@ async function ensureSearchPage(win, credentials) {
     const after = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
     if (after) return "loaded";
   }
-  await loginOnce(win, credentials);
-  await safeLoad(win, SEARCH_URL);
+  const how = await loginIntoIsolatedWindow(win, credentials);
   const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
   if (!ok) throw new Error("صفحة البحث في نايس دير لم تظهر");
-  return "logged-in";
+  return how;
 }
 
 // ---------------------------------------------------------------------------
@@ -1648,7 +1966,7 @@ async function fetchSource(win, url, { referrer } = {}) {
   if (win && !win.isDestroyed()) {
     let sameOrigin = false;
     try {
-      const here = new URL(win.webContents.getURL());
+      const here = new URL(wc(win).getURL());
       const there = new URL(url);
       sameOrigin = here.origin === there.origin;
     } catch {
@@ -1739,7 +2057,10 @@ async function captureScreenshot(win, { forceVisible = false } = {}) {
     try {
       if (win.isDestroyed()) return null;
       ensurePaintable(win);
-      const img = await win.webContents.capturePage();
+      // الصفحة جوه WebContentsView — اللقطة من المحتوى مش من شريط المتصفح
+      const page = contentOf(win);
+      if (!page) return null;
+      const img = await page.capturePage();
       if (!img || img.isEmpty()) return null;
 
       // الفحص الحقيقي: بكسلات الصفحة نفسها (صفحة بيضاء = لقطة فاضية)
@@ -1823,7 +2144,7 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
       if (res.reason === "protected" || res.reason === "pdf-embed") break;
       let loading = false;
       try {
-        loading = win.webContents.isLoadingMainFrame();
+        loading = wc(win).isLoadingMainFrame();
       } catch {
         loading = false;
       }
@@ -1842,7 +2163,7 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
   diag.stage = "network";
   let pageUrl = "";
   try {
-    pageUrl = win.webContents.getURL() || "";
+    pageUrl = wc(win).getURL() || "";
   } catch {
     pageUrl = "";
   }
@@ -1876,7 +2197,8 @@ function armPopupCapture(win, ref = "") {
     resolveChild(value);
   };
 
-  win.webContents.setWindowOpenHandler(({ url }) => {
+  // نافذة الروشتة بتتفتح من **محتوى** الصفحة (مش من شريط المتصفح)
+  wc(win).setWindowOpenHandler(({ url }) => {
     urls.push(url);
     capLog(ref, `نافذة صورة مطلوبة: ${String(url).slice(0, 160)}`);
     return {
@@ -1915,7 +2237,7 @@ function armPopupCapture(win, ref = "") {
     })();
   };
 
-  win.webContents.on("did-create-window", onChild);
+  wc(win).on("did-create-window", onChild);
 
   return {
     urls,
@@ -1928,7 +2250,7 @@ function armPopupCapture(win, ref = "") {
       const candidates = BrowserWindow.getAllWindows().filter((w) => {
         if (!w || w.isDestroyed() || w.id === self) return false;
         try {
-          const url = w.webContents.getURL() || "";
+          const url = contentOf(w)?.getURL() || "";
           return /PrescriptionImgs|Prescription|Beneficiary\/Prescription/i.test(url);
         } catch {
           return false;
@@ -1951,8 +2273,8 @@ function armPopupCapture(win, ref = "") {
       return null;
     },
     dispose() {
-      win.webContents.off("did-create-window", onChild);
-      if (!win.isDestroyed()) win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+      wc(win).off("did-create-window", onChild);
+      if (!win.isDestroyed()) wc(win).setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
     },
   };
 }
@@ -2008,7 +2330,7 @@ async function processForm(win, job) {
   const onWillNavigate = (_event, url) => {
     if (url && !url.startsWith("devtools://")) navigatedTo = url;
   };
-  win.webContents.on("will-navigate", onWillNavigate);
+  wc(win).on("will-navigate", onWillNavigate);
 
   // صفحة الروشتة محتاجة صور — نسمح بيها في النافذة دي بس
   setResourceMode(win, "images");
@@ -2081,7 +2403,7 @@ async function processForm(win, job) {
       if (navigatedTo) candidates.push(navigatedTo);
       for (const url of popup.urls) candidates.push(url);
       try {
-        const current = win.webContents.getURL();
+        const current = wc(win).getURL();
         if (current) candidates.push(current);
       } catch {
         /* تجاهل */
@@ -2106,7 +2428,7 @@ async function processForm(win, job) {
       const link = await run(win, S.FIND_IMAGE_LINK_SCRIPT);
       if (link && link !== "click") {
         const abs = link.startsWith("http") ? link : `${BASE}${link}`;
-        image = await captureFromUrl(abs, win.webContents.getURL(), ref);
+        image = await captureFromUrl(abs, wc(win).getURL(), ref);
         if (image) notes.push("التقاط من رابط صورة الروشتة");
       }
     }
@@ -2181,7 +2503,7 @@ async function processForm(win, job) {
   } finally {
     popup.dispose();
     if (!win.isDestroyed()) {
-      win.webContents.off("will-navigate", onWillNavigate);
+      wc(win).off("will-navigate", onWillNavigate);
       // رجوع لوضع توفير الموارد بعد ما خلصنا الروشتة
       setResourceMode(win, "search");
     }
@@ -2431,7 +2753,7 @@ ipcMain.handle("nd:open-login-window", async (_e, payload) => {
   try {
     const win = await openLoginWindow(payload?.url === "search" ? SEARCH_URL : LOGIN_URL);
     const state = await pageState(win);
-    return { ok: true, data: { url: win.webContents.getURL(), hasCode: Boolean(state && state.hasCode) } };
+    return { ok: true, data: { url: wc(win).getURL(), hasCode: Boolean(state && state.hasCode) } };
   } catch (err) {
     return { ok: false, error: String(err?.message || err) };
   }
@@ -2496,6 +2818,57 @@ ipcMain.handle("nd:watch-windows", async (_e, payload) => {
   }
   liveStep(on ? `وضع المتابعة: ${count} نافذة ظاهرة قدامك` : `رجّعت ${count} نافذة للخلفية`);
   return { ok: true, data: { on, windows: count } };
+});
+
+/**
+ * شريط المتصفح جوه كل نافذة: رجوع/تقدم/تحديث/تثبيت فوق.
+ * الأوامر دي بتتنفذ على **محتوى الصفحة الحقيقي** (الـWebContentsView) مش على
+ * النافذة نفسها، فالمستخدم بيشوف نفس اللي المتصفح بيعمله بالظبط.
+ */
+function chromeWindowOf(event) {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed() || !win.__rpView) return null;
+  return win;
+}
+
+ipcMain.on("nd:chrome-ready", (event) => {
+  const win = chromeWindowOf(event);
+  if (!win) return;
+  pushChromeState(win);
+  layoutContent(win);
+});
+
+ipcMain.on("nd:chrome-action", (event, payload) => {
+  const win = chromeWindowOf(event);
+  if (!win) return;
+  const page = contentOf(win);
+  if (!page) return;
+  const action = String(payload?.action || "");
+  try {
+    if (action === "back") {
+      const nh = page.navigationHistory;
+      if (nh && typeof nh.canGoBack === "function" ? nh.canGoBack() : page.canGoBack?.()) {
+        if (nh && typeof nh.goBack === "function") nh.goBack();
+        else page.goBack();
+      }
+    } else if (action === "forward") {
+      const nh = page.navigationHistory;
+      if (nh && typeof nh.canGoForward === "function" ? nh.canGoForward() : page.canGoForward?.()) {
+        if (nh && typeof nh.goForward === "function") nh.goForward();
+        else page.goForward();
+      }
+    } else if (action === "reload") {
+      page.reload();
+    } else if (action === "watch") {
+      // تثبيت النافذة فوق كل البرامج — نفس معنى «المتابعة» في نافذة واحدة
+      win.setAlwaysOnTop(!win.isAlwaysOnTop(), "normal");
+      if (win.isAlwaysOnTop()) win.showInactive();
+    }
+    pushChromeState(win);
+    setTimeout(() => pushChromeState(win), 250);
+  } catch (err) {
+    appendLog("warn", `شريط المتصفح: ${action} فشل — ${err?.message || err}`);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -2758,6 +3131,11 @@ ipcMain.handle("nd:search", async (_e, payload) => {
   try {
     return await workers.with(async (win) => {
       lastSearchWin = win;
+      // ربط النافذة بالساب **قبل** أي خطوة: كل استمارات الساب بتكمل على
+      // نفس المتصفح ده، ونتايج بحثه بتفضل موجودة (من غير بحث جديد لكل استمارة)
+      win.__rpSab = String(sab);
+      win.__rpSabDone = false;
+      labelWindow(win, `ساب ${String(sab).slice(0, 20)} — بحث`);
       await ensureSearchPage(win, credentials);
       // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
       const sessionState = await ensureSession(win, credentials);
@@ -2819,6 +3197,26 @@ ipcMain.handle("nd:form-image", async (_e, payload) => {
     const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
     return { ok: false, error: `${String(err?.message || err)}${files}`, files: evidence };
   }
+});
+
+/**
+ * خلاص الساب: النافذة اللي شايلاه بترجع للحوض نضيفة، وعنوانها بيرجع عام.
+ * مش تنظيف شكلي — ده اللي بيخلي «متصفح لكل ساب» حقيقي: الاستمارة اللي بعدها
+ * لساب تاني بتبدأ من صفحة بحث نظيفة مش من نص شغل ساب سابق.
+ */
+ipcMain.handle("nd:release-sab", async (_e, payload) => {
+  const sab = String(payload?.sab || "").trim();
+  let released = 0;
+  for (const win of workers.windows) {
+    if (!win || win.isDestroyed() || win.__rpSab !== sab) continue;
+    win.__rpSabDone = true;
+    win.__rpSab = null;
+    setResourceMode(win, "search");
+    labelWindow(win, "متصفح جاهز");
+    released += 1;
+  }
+  if (released) capLog("session", `الساب ${sab}: ${released} متصفح خلّص ورجع للحوض`);
+  return { ok: true, data: { sab, released } };
 });
 
 ipcMain.handle("nd:deletes", async () => {
@@ -2943,7 +3341,7 @@ ipcMain.handle("nd:logout-everything", async () => {
   await workers.closeAll();
   if (loginWin && !loginWin.isDestroyed()) {
     try {
-      await loginWin.webContents.session.clearStorageData();
+      await wc(loginWin).session.clearStorageData();
     } catch {
       /* تجاهل */
     }

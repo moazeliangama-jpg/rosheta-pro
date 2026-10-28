@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>روشتة برو — متصفح</title>
+    <style>
+      :root {
+        --bar-h: 46px;
+        --bg: #202124;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --field: #292a2d;
+        --line: #3c4043;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: "Segoe UI", Tahoma, sans-serif;
+        overflow: hidden;
+      }
+      .bar {
+        height: var(--bar-h);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--line);
+        -webkit-app-region: drag;
+      }
+      .bar > * {
+        -webkit-app-region: no-drag;
+      }
+      button {
+        width: 30px;
+        height: 30px;
+        border: 0;
+        border-radius: 8px;
+        background: transparent;
+        color: var(--fg);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+      }
+      button:hover:not(:disabled) {
+        background: #35363a;
+      }
+      button:disabled {
+        opacity: 0.35;
+        cursor: default;
+      }
+      .address {
+        flex: 1;
+        min-width: 80px;
+        height: 30px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0 10px;
+        border-radius: 999px;
+        background: var(--field);
+        border: 1px solid var(--line);
+        overflow: hidden;
+      }
+      .lock {
+        color: #81c995;
+        flex: 0 0 auto;
+      }
+      .url {
+        flex: 1;
+        font-size: 12px;
+        color: var(--muted);
+        direction: ltr;
+        text-align: left;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        user-select: text;
+      }
+      .sab {
+        flex: 0 0 auto;
+        font-size: 11px;
+        color: #9aa0a6;
+        background: #34353a;
+        border-radius: 6px;
+        padding: 2px 6px;
+        max-width: 190px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .spin {
+        width: 14px;
+        height: 14px;
+        border: 2px solid #5f6368;
+        border-top-color: #8ab4f8;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+        flex: 0 0 auto;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      svg {
+        width: 16px;
+        height: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <button id="back" title="رجوع (Alt+←)" disabled>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20z" /></svg>
+      </button>
+      <button id="fwd" title="تقدم (Alt+→)" disabled>
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 13h12.2l-5.6 5.6L12 20l8-8-8-8-1.4 1.4 5.6 5.6H4z" /></svg>
+      </button>
+      <button id="reload" title="تحديث (Ctrl+R)">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 5V1L7 6l5 5V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z" /></svg>
+      </button>
+      <div class="address">
+        <span class="lock" title="اتصال آمن">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 1a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-9a2 2 0 0 0-2-2h-1V6a5 5 0 0 0-5-5zm-3 8V6a3 3 0 1 1 6 0v3H9z" /></svg>
+        </span>
+        <span class="url" id="url">about:blank</span>
+        <span id="busy"></span>
+      </div>
+      <span class="sab" id="sab" hidden></span>
+      <button id="watch" title="ثبّت النافذة فوق الشاشة">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5h18v12H3zM2 19h20v2H2z" /></svg>
+      </button>
+    </div>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const api = window.rpChrome;
+      const send = (action) => api && api.act(action);
+
+      $("back").addEventListener("click", () => send("back"));
+      $("fwd").addEventListener("click", () => send("forward"));
+      $("reload").addEventListener("click", () => send("reload"));
+      $("watch").addEventListener("click", () => send("watch"));
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "F5" || (e.ctrlKey && e.key.toLowerCase() === "r")) return send("reload");
+        if (e.altKey && e.key === "ArrowLeft") return send("back");
+        if (e.altKey && e.key === "ArrowRight") return send("forward");
+      });
+
+      if (api && api.onState) {
+        api.onState((state) => {
+          if (typeof state.url === "string") $("url").textContent = state.url || "about:blank";
+          $("back").disabled = !state.canGoBack;
+          $("fwd").disabled = !state.canGoForward;
+          const busy = $("busy");
+          busy.innerHTML = state.loading ? '<span class="spin"></span>' : "";
+          const sab = $("sab");
+          if (state.label) {
+            sab.textContent = state.label;
+            sab.hidden = false;
+          } else {
+            sab.hidden = true;
+          }
+          document.title = state.label ? `روشتة برو — ${state.label}` : "روشتة برو — متصفح";
+          $("watch").style.color = state.onTop ? "#8ab4f8" : "";
+        });
+      }
+      api && api.ready && api.ready();
+    </script>
+  </body>
+</html>
