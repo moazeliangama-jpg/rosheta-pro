@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.3",
+  version: "1.0.4",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld("roshetta", {
   busy: (active) => ipcRenderer.invoke("nd:busy", { active }),
   warmup: (workersCount) => ipcRenderer.invoke("nd:warmup", { workers: workersCount }),
   login: (payload) => ipcRenderer.invoke("nd:login", payload),
+  /** نافذة نايس دير المرئية — تسجيل يدوي / عدّي أي تحقق بشري مرة واحدة */
+  openLoginWindow: (payload) => ipcRenderer.invoke("nd:open-login-window", payload),
+  /** وضع النوافذ: خلفية مرئية (افتراضي) أو مخفية تمامًا */
+  setWindowMode: (payload) => ipcRenderer.invoke("nd:set-window-mode", payload),
+  /** آخر خطوات محاولة الدخول — بتظهر في الإعدادات */
+  loginTrace: () => ipcRenderer.invoke("nd:login-trace"),
   status: () => ipcRenderer.invoke("nd:status"),
   searchSub: (payload) => ipcRenderer.invoke("nd:search", payload),
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),

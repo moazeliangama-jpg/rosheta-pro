@@ -22,6 +22,7 @@ const {
   powerSaveBlocker,
   Notification,
   safeStorage,
+  screen,
 } = require("electron");
 const os = require("node:os");
 const fs = require("node:fs");
@@ -34,6 +35,7 @@ const SEC = require("./security.cjs");
 const UPD = require("./updates.cjs");
 const BUG = require("./bugreport.cjs");
 const RX = require("./rx-page.cjs");
+const LG = require("./nd-login.cjs");
 
 const BASE = "https://nicedeer.net";
 const LOGIN_URL = `${BASE}/Account/Login`;
@@ -555,6 +557,14 @@ function firstSuccess(promises, timeoutMs) {
 // بركة نوافذ
 // ---------------------------------------------------------------------------
 
+/**
+ * نوافذ الأتمتة بتتفتح في **الخلفية** (موجودة على الشاشة لكن مش بتاخد التركيز)
+ * مش مخفية تمامًا. السبب عملي:Chromium بيعتبر النافذة المخفية «مش مرئية»،
+ * ونايس دير (Cloudflare) بيرفض الدخول/بيعلّق التحقق في نافذة مش مرئية،
+ * وكمان الرسم بيتوقف فبتطلع صورة الروشتة بيضاء.
+ */
+let backgroundWindows = true;
+
 function hiddenWindowOptions(extra = {}) {
   return {
     show: false,
@@ -572,6 +582,58 @@ function hiddenWindowOptions(extra = {}) {
       ...extra,
     },
   };
+}
+
+/** مكان النافذة في الخلفية: ركن الشاشة اليمين تحت، مرتّبة فوق بعضها بشكل متدرّج */
+function backgroundBounds(index = 0) {
+  try {
+    const area = screen.getPrimaryDisplay().workArea;
+    const width = Math.min(1024, Math.max(780, Math.round(area.width * 0.55)));
+    const height = Math.min(760, Math.max(560, Math.round(area.height * 0.62)));
+    const step = (Number(index) % 5) * 18;
+    return {
+      x: area.x + area.width - width - 12 - step,
+      y: area.y + area.height - height - 12 - step,
+      width,
+      height,
+    };
+  } catch {
+    return { x: 40, y: 40, width: 1000, height: 700 };
+  }
+}
+
+/**
+ * عرض النافذة في الخلفية من غير سرقة التركيز.
+ * لو المستخدم قافل الوضع ده، النافذة بتفضل مخفية (سلوك النسخ القديمة).
+ */
+function presentInBackground(win, index = 0) {
+  if (!win || win.isDestroyed()) return;
+  if (!backgroundWindows) {
+    try {
+      win.hide();
+    } catch {
+      /* تجاهل */
+    }
+    return;
+  }
+  try {
+    win.setBounds(backgroundBounds(index));
+    win.setSkipTaskbar(true);
+    // showInactive: بتترسم وبتتحسب «مرئية» عند الموقع، بس مش بتسحب التركيز من البرنامج
+    win.showInactive();
+  } catch {
+    /* لو مش قادر يعرضها، بنكمل */
+  }
+}
+
+/** قبل اللقطة: نتأكد إن النافذة بترسم فعلًا */
+function ensurePaintable(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    if (!win.isVisible()) win.showInactive();
+  } catch {
+    /* تجاهل */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +703,8 @@ class WindowPool {
     win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
     win.__rpOps = 0;
     setResourceMode(win, this.blockImages ? "search" : "images");
+    // النافذة بتظهر في الخلفية (مرئية للموقع) — ده اللي بيخلي الدخول والتحقق يشتغلوا
+    presentInBackground(win, this.windows.length);
     // منع تحويل أي نافذة لصفحة غير متوقعة (بيحصل مع redirects لصفحة الدخول)
     win.on("closed", () => {
       const i = this.windows.indexOf(win);
@@ -896,37 +960,91 @@ async function pageState(win) {
  */
 let loginPromise = null;
 
-async function loginOnce(win, creds) {
-  if (loginPromise) {
-    // نافذة تانية بتسجّل الدخول دلوقتي — بنستنى نفس الوعد ونستفيد من الكوكيز المشتركة
-    const shared = await loginPromise.catch(() => null);
-    if (!shared || !shared.ok) {
-      throw new Error(
-        shared && shared.message
-          ? String(shared.message)
-          : "محاولة الدخول من نافذة تانية فشلت — جرّب «اختبار الدخول» تاني",
-      );
-    }
-    return { ok: true, already: true, shared: true };
+// ---------------------------------------------------------------------------
+// أثر المحاولة: كل خطوة بتتسجّل — عشان أي فشل يبقى له سبب مكتوب مش تخمين
+// ---------------------------------------------------------------------------
+
+let loginTrace = [];
+
+function traceStep(message) {
+  const line = `${new Date().toLocaleTimeString("ar-EG")} — ${message}`;
+  loginTrace.push(line);
+  if (loginTrace.length > 80) loginTrace.shift();
+  try {
+    appendLog("info", `login: ${message}`);
+  } catch {
+    /* السجل مش حرج */
   }
-  loginPromise = login(win, creds).finally(() => {
-    loginPromise = null;
-  });
-  const res = await loginPromise;
-  return res || { ok: true };
+  return line;
 }
 
-/** هل الجلسة لسه شغالة؟ لو اتحوّلت لصفحة الدخول بندخل تاني مرة واحدة */
-async function ensureSession(win, creds) {
-  const check = await run(win, S.SESSION_CHECK_SCRIPT);
-  if (check !== "logged-out") return check;
-  await safeLoad(win, SEARCH_URL);
-  const after = await run(win, S.SESSION_CHECK_SCRIPT);
-  if (after === "ok") return "ok";
-  await loginOnce(win, creds);
-  await safeLoad(win, SEARCH_URL);
-  return "relogin";
+class LoginError extends Error {
+  constructor(message, code = "unknown") {
+    super(message);
+    this.name = "LoginError";
+    this.code = code;
+  }
 }
+
+// ---------------------------------------------------------------------------
+// نافذة تسجيل الدخول المرئية (بتشارك نفس الجلسة مع كل نوافذ الأتمتة)
+// ---------------------------------------------------------------------------
+
+let loginWin = null;
+
+function getLoginWindow() {
+  if (loginWin && !loginWin.isDestroyed()) return loginWin;
+  loginWin = new BrowserWindow({
+    width: 1180,
+    height: 860,
+    show: false,
+    title: "نايس دير — تسجيل الدخول",
+    autoHideMenuBar: true,
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      partition: ND_PARTITION,
+      backgroundThrottling: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+      // الرسم لازم يشتغل عشان Cloudflare والتحقق البشري
+      paintWhenInitiallyHidden: true,
+    },
+  });
+  loginWin.webContents.setUserAgent(UA);
+  loginWin.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+  loginWin.on("closed", () => {
+    loginWin = null;
+  });
+  return loginWin;
+}
+
+/** فتح نافذة الدخول للمستخدم (تسجيل يدوي / عدّي التحقق) */
+async function openLoginWindow(url = LOGIN_URL) {
+  const win = getLoginWindow();
+  try {
+    win.setSkipTaskbar(false);
+    win.center();
+    win.show();
+    win.focus();
+  } catch {
+    /* تجاهل */
+  }
+  if (url) await safeLoad(win, url, TIMEOUTS.pageLoad);
+  return win;
+}
+
+function hideLoginWindow() {
+  try {
+    if (loginWin && !loginWin.isDestroyed() && loginWin.isVisible()) loginWin.hide();
+  } catch {
+    /* تجاهل */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// قراءة حالة الصفحة
+// ---------------------------------------------------------------------------
 
 /** قراءة حالة صفحة الدخول وتصنيفها (فورم / داخل / تحقق بشري / رسالة رفض) */
 async function probeLogin(win) {
@@ -952,7 +1070,7 @@ async function waitLoginState(win, wanted, timeoutMs) {
         return false;
       }
     })();
-    await sleep(loading ? 200 : 150);
+    await sleep(loading ? 220 : 160);
   }
   return last;
 }
@@ -960,113 +1078,282 @@ async function waitLoginState(win, wanted, timeoutMs) {
 /** الدليل النهائي: هل صفحة البحث بتفتح فعلًا؟ (مش بس العنوان اتغيّر) */
 async function verifySessionBySearchPage(win) {
   await safeLoad(win, SEARCH_URL, TIMEOUTS.login);
-  const ok = await run(win, S.waitForSelectorScript("#SearchCode", 12000));
-  return Boolean(ok);
+  const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+  if (!ok) return false;
+  const hasPayer = await run(win, S.waitForSelectorScript("#payerId", 8000));
+  traceStep(hasPayer ? "صفحة البحث والبـاير ظاهرين ✓" : "صفحة البحث ظاهرة (الباير مش ظاهر)");
+  return true;
 }
 
-async function login(win, credentials) {
-  if (!credentials.username || !credentials.password) {
-    throw new Error("بيانات دخول نايس دير غير محفوظة — اكتب اليوزر والباسورد في الإعداد");
-  }
+// ---------------------------------------------------------------------------
+// تعبئة الفورم والضغط — بطريقة بتشتغل مع ASP.NET وjQuery
+// ---------------------------------------------------------------------------
 
-  await safeLoad(win, LOGIN_URL, TIMEOUTS.login);
-
-  // ممكن تكون الجلسة شغالة أصلًا — نايس دير بيفضل مسجّل. منكتبش البيانات على الفاضي.
-  let probe = await waitLoginState(win, ["form", "logged-in", "challenge", "error"], TIMEOUTS.login);
-  if (!probe) throw new Error("صفحة تسجيل الدخول لم تفتح — الشبكة أو الموقع مش متاح");
-
-  if (probe.state === "logged-in") {
-    win.__rpReady = true;
-    return { ok: true, already: true };
-  }
-
-  // تحقق Cloudflare بيمرّ لوحده — بنستناه بدل ما نفشل على طول
-  if (probe.state === "challenge") {
-    probe = await waitLoginState(win, ["form", "logged-in"], 25000);
-    if (probe && probe.state === "logged-in") {
-      win.__rpReady = true;
-      return { ok: true, already: true };
-    }
-    if (!probe || probe.state === "challenge") {
-      throw new Error(
-        "نايس دير عارض تحقق بشري (Cloudflare) — افتح «الموقع في المتصفح»، عدّي التحقق، وبعدين جرّب تاني",
-      );
-    }
-  }
-
-  if (probe.state === "error" && probe.errorText) {
-    throw new Error(`نايس دير رفض من غير محاولة دخول: ${probe.errorText}`);
-  }
-
-  if (!probe.hasUser || !probe.hasPass) {
-    throw new Error("خانات تسجيل الدخول مش موجودة في الصفحة (#UserName / #passwordInput)");
-  }
-
-  const filled = await run(
+async function fillLoginForm(win, credentials) {
+  return run(
     win,
     `(() => {
       const setVal = (sel, value) => {
         const el = document.querySelector(sel);
         if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         el.focus();
-        el.value = value;
+        setter.call(el, value);
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
-        if (window.jQuery) { try { window.jQuery(el).val(value).trigger('change'); } catch (e) {} }
-        return true;
+        el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'a' }));
+        if (window.jQuery) {
+          try { window.jQuery(el).val(value).trigger('change').trigger('keyup'); } catch (e) {}
+        }
+        return el.value === value;
       };
       const a = setVal('#UserName', ${JSON.stringify(credentials.username)});
       const b = setVal('#passwordInput', ${JSON.stringify(credentials.password)});
-      return a && b;
+      return { ok: a && b, user: a, pass: b };
     })()`,
   );
-  if (!filled) throw new Error("تعذّر كتابة بيانات الدخول في الخانات (#UserName / #passwordInput)");
+}
 
-  const clicked = await run(
+async function submitLogin(win, { viaEnter = false } = {}) {
+  return run(
     win,
-    `(() => {
-      const btn = document.querySelector('#loginBTN') || [...document.querySelectorAll('button')].find((b) => /log\\s*in/i.test(b.textContent || ''));
-      if (!btn) return false;
-      btn.click();
-      return true;
-    })()`,
+    viaEnter
+      ? `(() => {
+          const form = document.querySelector('#passwordInput') && document.querySelector('#passwordInput').form;
+          if (!form) return false;
+          form.requestSubmit ? form.requestSubmit() : form.submit();
+          return true;
+        })()`
+      : `(() => {
+          const btn = document.querySelector('#loginBTN') || [...document.querySelectorAll('button, input[type=submit]')].find((b) => /log\s*in|دخول|تسجيل/i.test(b.textContent || b.value || ''));
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })()`,
   );
-  if (!clicked) throw new Error("زرار الدخول (#loginBTN) مش موجود في الصفحة");
+}
 
-  // بعد الضغط: نجاح / رسالة رفض / تحقق بشري
-  probe = await waitLoginState(win, ["logged-in", "error", "challenge"], TIMEOUTS.login);
+/** حفظ أدلة عند الفشل: HTML + صورة الشاشة */
+async function dumpLoginDiagnostics(win, tag = "login") {
+  const out = {};
+  try {
+    fs.mkdirSync(diagDir(), { recursive: true });
+    const base = path.join(diagDir(), LG.diagnosticsName(tag));
+    const html = await run(win, "(() => document.documentElement.outerHTML || '')()");
+    if (typeof html === "string" && html.length) {
+      const clean = credentials && credentials.password ? html.split(credentials.password).join("***") : html;
+      out.html = `${base}.html`;
+      fs.writeFileSync(out.html, clean.slice(0, 3 * 1024 * 1024), "utf8");
+    }
+    const shot = await captureScreenshot(win, { forceVisible: true });
+    if (shot && shot.dataUrl) {
+      const base64 = String(shot.dataUrl).split(",")[1] || "";
+      if (base64) {
+        out.image = `${base}.png`;
+        fs.writeFileSync(out.image, Buffer.from(base64, "base64"));
+      }
+    }
+  } catch {
+    /* التشخيص مش حرج */
+  }
+  return out;
+}
 
-  if (probe && probe.state === "logged-in") {
-    win.__rpReady = true;
-    return { ok: true, already: false };
+// ---------------------------------------------------------------------------
+// مسار الدخول الكامل
+// ---------------------------------------------------------------------------
+
+/**
+ * تسجيل الدخول في نافذة معيّنة.
+ *
+ * @param {BrowserWindow} win
+ * @param {{username: string, password: string}} creds
+ * @param {{challengeWaitMs?: number, interactive?: boolean, tag?: string}} [opts]
+ */
+async function runLoginSteps(win, creds, opts = {}) {
+  const challengeWaitMs = Number(opts.challengeWaitMs) || 45000;
+  const interactive = Boolean(opts.interactive);
+  loginTrace = [];
+
+  if (!creds.username || !creds.password) {
+    throw new LoginError("بيانات دخول نايس دير غير محفوظة — اكتب اليوزر والباسورد في الإعداد", "no-credentials");
   }
 
-  if (probe && probe.state === "challenge") {
-    probe = await waitLoginState(win, ["logged-in", "form"], 20000);
-    if (probe && probe.state === "logged-in") {
-      win.__rpReady = true;
-      return { ok: true, already: false };
+  // النافذة لازم تكون مرئية: نايس دير/Cloudflare بيعلّقوا النافذة المخفية
+  if (!interactive) presentInBackground(win, 0);
+  else {
+    try {
+      win.setSkipTaskbar(false);
+      win.show();
+      win.focus();
+    } catch {
+      /* تجاهل */
     }
-    if (probe && probe.state === "form") {
-      throw new Error(
-        "نايس دير عرض تحقق بشري قبل قبول الدخول — عدّي التحقق من «الموقع في المتصفح» وجرّب تاني",
+  }
+  traceStep(`فتح صفحة الدخول (${interactive ? "نافذة مرئية" : "نافذة خلفية"})`);
+  await safeLoad(win, LOGIN_URL, TIMEOUTS.pageLoad);
+
+  let probe = await waitLoginState(win, ["form", "logged-in", "challenge", "error"], TIMEOUTS.login);
+  if (!probe) {
+    const files = await dumpLoginDiagnostics(win, opts.tag || "login");
+    throw new LoginError(
+      LG.buildLoginFailure({ outcome: "timeout", reason: "الصفحة مافتحتش أصلًا", files }),
+      "timeout",
+    );
+  }
+  traceStep(LG.describeProbe(probe));
+
+  // الجلسة شغالة أصلًا
+  if (probe.state === "logged-in") return { ok: true, already: true };
+
+  // تحقق بشري: بنستنى (المستخدم ممكن يعدّيه في النافذة المرئية)
+  if (probe.state === "challenge") {
+    if (interactive) {
+      try {
+        win.setSkipTaskbar(false);
+        win.show();
+        win.focus();
+      } catch {
+        /* تجاهل */
+      }
+      traceStep("تحقق بشري ظاهر — النافذة مفتوحة قدامك، عدّي التحقق");
+    }
+    const started = Date.now();
+    while (Date.now() - started < challengeWaitMs) {
+      const next = await probeLogin(win);
+      if (next && next.state === "logged-in") {
+        traceStep("التحقق عدّى والدخول تم ✓");
+        return { ok: true, already: true };
+      }
+      if (next && next.state === "form") break;
+      await sleep(700);
+    }
+    const still = await probeLogin(win);
+    if (!still || still.state === "challenge") {
+      const files = await dumpLoginDiagnostics(win, "login-challenge");
+      throw new LoginError(
+        LG.buildLoginFailure({ outcome: "challenge", reason: still && still.message, probe: still, files }),
+        "challenge",
       );
     }
-    throw new Error("نايس دير عارض تحقق بشري (Cloudflare) — الدخول لم يُقيَّم أصلًا");
   }
 
-  if (probe && probe.errorText) {
-    throw new Error(`نايس دير رفض الدخول: ${probe.errorText}`);
+  probe = await probeLogin(win);
+  if (probe && probe.state === "logged-in") return { ok: true, already: true };
+  if (probe && probe.state === "error" && probe.errorText) {
+    throw new LoginError(`نايس دير رفض الدخول قبل المحاولة: ${probe.errorText}`, "error");
+  }
+  if (!probe || !probe.hasUser || !probe.hasPass) {
+    const files = await dumpLoginDiagnostics(win, "login-noform");
+    throw new LoginError(
+      LG.buildLoginFailure({
+        outcome: "unknown",
+        reason: "خانات الدخول (#UserName / #passwordInput) مش موجودة في الصفحة",
+        probe,
+        files,
+      }),
+      "no-form",
+    );
   }
 
-  // الصفحة ممكن تكون سايبة الفورم من غير ما العنوان يتغيّر — الدليل هو صفحة البحث
-  if (await verifySessionBySearchPage(win)) {
-    win.__rpReady = true;
-    return { ok: true, already: false };
+  const filled = await fillLoginForm(win, creds);
+  if (!filled || !filled.ok) {
+    const files = await dumpLoginDiagnostics(win, "login-fill");
+    throw new LoginError(
+      LG.buildLoginFailure({
+        outcome: "unknown",
+        reason: `تعذّر كتابة البيانات (يوزر: ${filled && filled.user ? "تم" : "فشل"}، باسورد: ${filled && filled.pass ? "تم" : "فشل"})`,
+        probe,
+        files,
+      }),
+      "fill-failed",
+    );
+  }
+  traceStep("تم كتابة اليوزر والباسورد");
+
+  const clicked = await submitLogin(win);
+  traceStep(clicked ? "تم الضغط على زرار الدخول" : "زرار الدخول مش موجود — بنجرّب submit للفورم");
+  if (!clicked) await submitLogin(win, { viaEnter: true });
+
+  // انتظار النتيجة مع ضغط Enter كخطة بديلة مرة واحدة
+  const started = Date.now();
+  let enterTried = false;
+  let verdict = { done: false, outcome: "unknown", reason: "بنستنى" };
+  let lastProbe = null;
+
+  while (!verdict.done) {
+    await sleep(220);
+    const elapsedMs = Date.now() - started;
+    lastProbe = await probeLogin(win);
+    verdict = LG.classifyAfterLogin(lastProbe, { elapsedMs, timeoutMs: TIMEOUTS.login + 15000 });
+
+    if (!verdict.done && !enterTried && LG.shouldTryEnterFallback({ outcome: verdict.outcome, elapsedMs, alreadyTried: false })) {
+      enterTried = true;
+      traceStep("الصفحة لسه على الفورم — بنجرّب Enter على الفورم");
+      await submitLogin(win, { viaEnter: true });
+    }
   }
 
-  const snippet = probe && probe.bodySnippet ? ` — آخر ما ظهر في الصفحة: ${probe.bodySnippet.slice(0, 120)}` : "";
-  throw new Error(`الدخول لم يكتمل: ${probe ? probe.message : "الصفحة مش بتستجيب"}${snippet}`);
+  traceStep(`نتيجة المحاولة: ${verdict.outcome} — ${verdict.reason}`);
+
+  if (verdict.outcome === "success") return { ok: true, already: false };
+
+  // أي نتيجة تانية: بنتأكد من صفحة البحث (الدليل الحقيقي)
+  const verified = await verifySessionBySearchPage(win);
+  if (verified) return { ok: true, already: false };
+
+  const finalProbe = (await probeLogin(win)) || lastProbe;
+  const files = await dumpLoginDiagnostics(win, `login-${verdict.outcome}`);
+  const message = LG.buildLoginFailure({
+    outcome: verdict.outcome === "error" ? "error" : verdict.outcome,
+    reason: verdict.outcome === "error" ? finalProbe && finalProbe.errorText ? finalProbe.errorText : verdict.reason : verdict.reason,
+    probe: finalProbe,
+    files,
+  });
+  throw new LoginError(message, verdict.outcome);
+}
+
+/** دخول من نافذة الأتمتة (خلفية). لو الموقع طلب تحقق بشري بنفتح النافذة المرئية */
+async function loginOnce(win, creds) {
+  if (loginPromise) {
+    const shared = await loginPromise.catch(() => null);
+    if (!shared || !shared.ok) {
+      throw new Error(shared && shared.message ? String(shared.message) : "محاولة الدخول من نافذة تانية فشلت — جرّب «اختبار الدخول» تاني");
+    }
+    return { ok: true, already: true, shared: true };
+  }
+
+  loginPromise = (async () => {
+    try {
+      return await runLoginSteps(win, creds, { challengeWaitMs: 30000, interactive: false, tag: "login-worker" });
+    } catch (err) {
+      const code = err instanceof LoginError ? err.code : "unknown";
+      if (code === "challenge" || code === "no-form" || code === "timeout" || code === "unknown") {
+        traceStep("الدخول المخفي ماحصلش — بنفتح نافذة الدخول المرئية");
+        const visible = getLoginWindow();
+        const res = await runLoginSteps(visible, creds, { challengeWaitMs: 180000, interactive: true, tag: "login-visible" });
+        hideLoginWindow();
+        return res;
+      }
+      throw err;
+    }
+  })().finally(() => {
+    loginPromise = null;
+  });
+
+  return loginPromise;
+}
+
+/** هل الجلسة لسه شغالة؟ لو اتحوّلت لصفحة الدخول بندخل تاني مرة واحدة */
+async function ensureSession(win, creds) {
+  const check = await run(win, S.SESSION_CHECK_SCRIPT);
+  if (check !== "logged-out") return check;
+  await safeLoad(win, SEARCH_URL);
+  const after = await run(win, S.SESSION_CHECK_SCRIPT);
+  if (after === "ok") return "ok";
+  await loginOnce(win, creds);
+  await safeLoad(win, SEARCH_URL);
+  return "relogin";
 }
 
 /** يضمن إن النافذة على صفحة البحث (بيستخدم كاش عشان ما يدفعش تكلفة كل مرة) */
@@ -1284,6 +1571,7 @@ async function captureScreenshot(win, { forceVisible = false } = {}) {
   const shoot = async () => {
     try {
       if (win.isDestroyed()) return null;
+      ensurePaintable(win);
       const img = await win.webContents.capturePage();
       if (!img || img.isEmpty()) return null;
 
@@ -1446,6 +1734,8 @@ function armPopupCapture(win, ref = "") {
 
   const onChild = (child) => {
     child.webContents.setUserAgent(UA);
+    // الصورة لازم الصفحة تترسم: بنعرضها في الخلفية لحظة الالتقاط وبعدها بتتقفل
+    presentInBackground(child, 0);
     void (async () => {
       try {
         const image = await grab(child, "نافذة منبثقة");
@@ -1871,56 +2161,95 @@ ipcMain.handle("nd:login", async (_e, payload) => {
     };
   }
   const started = Date.now();
+  const reply = (data) => ({
+    trace: LG.summarizeTrace(loginTrace, 30),
+    ms: Date.now() - started,
+    ...data,
+  });
+
   try {
-    return await workers.with(async (win) => {
-      // أسرع طريق: الجلسة شغالة أصلًا
-      const state = await pageState(win);
-      if (state && state.hasCode) return { ok: true, already: true, ms: Date.now() - started };
-
-      // نجرب صفحة البحث الأول: لو دخلت يبقى الجلسة سارية (مفيش داعي لتسجيل جديد)
-      await safeLoad(win, SEARCH_URL, TIMEOUTS.login);
-      const ready = await pageState(win);
-      if (ready && ready.hasCode) {
-        win.__rpReady = true;
-        setBusy(true);
-        return { ok: true, already: true, ms: Date.now() - started };
-      }
-
-      // نايس دير رجّعنا لصفحة الدخول → تسجيل دخول حقيقي مع تقرير السبب
-      const res = await loginOnce(win, credentials);
-
-      // تأكيد نهائي: صفحة البحث بتفتح؟
-      const verified = await verifySessionBySearchPage(win);
-      if (!verified) {
-        const last = await probeLogin(win);
-        return {
-          ok: false,
-          verified: false,
-          state: last ? last.state : "unknown",
-          error:
-            "البيانات اتقبلت بس صفحة البحث مش بتفتح — " +
-            (last ? last.message : "الصفحة مش بتستجيب") +
-            " — جرّب «الموقع في المتصفح» وتأكد إن الحساب مفعّل عليه صرف نايس دير",
-          ms: Date.now() - started,
-        };
-      }
+    // أسرع طريق: الجلسة شغالة أصلًا (بنفحص في نافذة الدخول نفسها — نفس الجلسة)
+    const win = getLoginWindow();
+    await safeLoad(win, SEARCH_URL, TIMEOUTS.login);
+    const ready = await pageState(win);
+    if (ready && ready.hasCode) {
       setBusy(true);
-      return {
-        ok: true,
-        already: Boolean(res && res.already),
-        verified: true,
-        ms: Date.now() - started,
-      };
-    });
+      traceStep("الجلسة شغالة أصلًا — صفحة البحث فتحت");
+      return reply({ ok: true, already: true, verified: true });
+    }
+
+    // الدخول بيتم في نافذة **مرئية**: Cloudflare والتحقق البشري مش بيشتغلوا في نافذة مخفية
+    traceStep("بدء الدخول من النافذة المرئية");
+    await openLoginWindow(LOGIN_URL);
+    const res = await runLoginSteps(win, credentials, { challengeWaitMs: 240000, interactive: true, tag: "login-test" });
+
+    const verified = await verifySessionBySearchPage(win);
+    if (!verified) {
+      const last = await probeLogin(win);
+      const files = await dumpLoginDiagnostics(win, "login-unverified");
+      return reply({
+        ok: false,
+        verified: false,
+        state: last ? last.state : "unknown",
+        files,
+        error: [
+          "الدخول اتقبل لكن صفحة البحث مش بتفتح.",
+          last ? `آخر قراءة: ${LG.describeProbe(last)}` : "",
+          "راجع صلاحية الحساب على نايس دير (لازم يكون مفعّل عليه صرف الصيدلية).",
+          files.html || files.image ? `ملفات التشخيص: ${[files.html, files.image].filter(Boolean).join(" · ")}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      });
+    }
+
+    setBusy(true);
+    traceStep("الدخول نجح ✓");
+    // النافذة بتتقفل بعد النجاح (الجلسة محفوظة في الـ partition)
+    hideLoginWindow();
+    return reply({ ok: true, already: Boolean(res && res.already), verified: true });
   } catch (err) {
-    return {
+    const files = null;
+    return reply({
       ok: false,
+      verified: false,
+      code: err instanceof LoginError ? err.code : "error",
+      state: err instanceof LoginError ? err.code : "error",
+      files,
       error: String(err?.message || err),
-      state: "error",
-      ms: Date.now() - started,
-    };
+    });
   }
 });
+
+/** فتح نافذة نايس دير المرئية (تسجيل يدوي / عدّي التحقق) — نفس الجلسة */
+ipcMain.handle("nd:open-login-window", async (_e, payload) => {
+  try {
+    const win = await openLoginWindow(payload?.url === "search" ? SEARCH_URL : LOGIN_URL);
+    const state = await pageState(win);
+    return { ok: true, data: { url: win.webContents.getURL(), hasCode: Boolean(state && state.hasCode) } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+/** وضع النوافذ: خلفية مرئية (الافتراضي) أو مخفية تمامًا */
+ipcMain.handle("nd:set-window-mode", async (_e, payload) => {
+  backgroundWindows = payload?.background !== false;
+  try {
+    loginWin?.setSkipTaskbar?.(!backgroundWindows);
+  } catch {
+    /* تجاهل */
+  }
+  for (const [index, win] of workers.windows.entries()) {
+    if (!win || win.isDestroyed()) continue;
+    if (backgroundWindows) presentInBackground(win, index);
+    else win.hide();
+  }
+  return { ok: true, data: { background: backgroundWindows } };
+});
+
+/** آخر خطوات محاولة الدخول — للتشخيص */
+ipcMain.handle("nd:login-trace", async () => ({ ok: true, data: { trace: LG.summarizeTrace(loginTrace, 40) } }));
 
 // ---------------------------------------------------------------------------
 // ٩٦) التحديث من GitHub Releases: فحص + تنزيل + تشغيل المثبّت

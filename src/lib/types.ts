@@ -245,6 +245,12 @@ export interface Settings {
   reducedMotion: boolean;
   /** دخول تلقائي على نايس دير عند فتح البرنامج بالبيانات المحفوظة */
   autoLogin: boolean;
+  /**
+   * نوافذ الأتمتة تفتح في الخلفية (مرئية للموقع، مش بتاخد التركيز).
+   * الافتراضي true — إخفاؤها تمامًا بيخلّي نايس دير/Cloudflare يرفضوا الدخول
+   * وبيطلّع صور فاضية، فالتغيير للـfalse للحالات الخاصة بس.
+   */
+  backgroundWindows: boolean;
   /** إبلاغ تلقائي عن الأخطاء غير المتوقعة على GitHub (منقّح، بدون بيانات مرضى) */
   errorReporting: boolean;
   lastReportDate: string;

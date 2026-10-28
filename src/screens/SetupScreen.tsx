@@ -57,6 +57,8 @@ export function SetupScreen({
 
   const [busy, setBusy] = useState<"login" | "file" | "wa" | null>(null);
   const [loginNote, setLoginNote] = useState("");
+  const [loginTrace, setLoginTrace] = useState<string[]>([]);
+  const [loginFiles, setLoginFiles] = useState<Record<string, string> | null>(null);
   const [waState, setWaState] = useState("closed");
   const [probeSab, setProbeSab] = useState("");
   // ٧٣) الإعدادات المتقدمة مطوية افتراضيًا — زرار التشغيل هو الواجهة
@@ -168,24 +170,39 @@ export function SetupScreen({
   const doLogin = async () => {
     if (!hasDesktopBridge()) return;
     setBusy("login");
-    setLoginNote("");
+    setLoginNote("بيدخل على نايس دير في نافذة حقيقية… لو ظهر تحقق بشري (Cloudflare) عدّيه في النافذة.");
+    setLoginTrace([]);
+    setLoginFiles(null);
     setError("");
+    const hint = window.setTimeout(() => {
+      setLoginNote("لسه بيحاول… افتح النافذة اللي ظهرت وعدّي أي تحقق بشري، أو اضغط «افتح نافذة نايس دير».");
+    }, 20000);
     try {
       const b = bridge()!;
       await b.setCredentials({ username: settings.niceDeerUser, password: settings.niceDeerPass });
       const res = await b.login({ username: settings.niceDeerUser, password: settings.niceDeerPass });
+      setLoginTrace(Array.isArray(res.trace) ? res.trace : []);
+      setLoginFiles(res.files ?? null);
       if (res.ok) {
         await saveCredentials();
         setLoggedIn(true);
-        setLoginNote(res.already ? "الجلسة مسجلة بالفعل — مفيش حاجة تتعمل." : "تم تسجيل الدخول بنجاح.");
-        logLine("ok", "تسجيل دخول نايس دير ناجح.");
+        setLoginNote(
+          res.already
+            ? "الجلسة مسجلة بالفعل — مفيش حاجة تتعمل."
+            : `تم تسجيل الدخول بنجاح${res.ms ? ` في ${(res.ms / 1000).toFixed(1)} ثانية` : ""}.`,
+        );
+        logLine("ok", "تسجيل دخول نايس دير ناجح — اتأكدنا من صفحة البحث.");
       } else {
         setLoggedIn(false);
         setLoginNote(res.error ?? "فشل تسجيل الدخول");
         logLine("error", `فشل دخول نايس دير: ${res.error}`);
       }
     } finally {
+      window.clearTimeout(hint);
       setBusy(null);
+      // بعد أي محاولة بنقرأ سجل الخطوات الحقيقي حتى لو الاستدعاء نفسه رجع قبل كده
+      const trace = await bridge()?.loginTrace();
+      if (trace?.ok && trace.data?.trace?.length) setLoginTrace(trace.data.trace);
     }
   };
 
@@ -363,6 +380,22 @@ export function SetupScreen({
           )}
           {loginNote ? <span className="text-xs text-white/50">{loginNote}</span> : null}
           <button
+            className="rounded-lg border border-teal-400/30 bg-teal-400/10 px-2.5 py-1 text-xs text-teal-200 hover:bg-teal-400/20"
+            title="بتفتح نايس دير في نافذة حقيقية قدامك — تسجّل بإيدك أو تعدّي التحقق البشري مرة واحدة"
+            onClick={async () => {
+              const res = await bridge()?.openLoginWindow({ url: "login" });
+              if (res?.ok) {
+                logLine("ok", "اتفتحت نافذة نايس دير للتسجيل اليدوي.");
+                setLoginNote("اتفتحت نافذة نايس دير قدامك — سجّل الدخول وبعد كده اضغط «اختبار الدخول».");
+              } else {
+                setLoginNote(res?.error ?? "تعذر فتح نافذة نايس دير");
+                logLine("error", `تعذر فتح نافذة نايس دير: ${res?.error}`);
+              }
+            }}
+          >
+            افتح نافذة نايس دير
+          </button>
+          <button
             className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-white/50 hover:bg-white/5"
             onClick={async () => {
               await bridge()?.logoutNiceDeer();
@@ -378,6 +411,41 @@ export function SetupScreen({
           >
             <Link2 className="mr-1 inline h-3 w-3" /> فتح الموقع للتأكد
           </button>
+        </div>
+
+        {/* سبب فشل الدخول الحقيقي — خطوات المحاولة زي ما حصلت بالظبط */}
+        {loginTrace.length ? (
+          <details className="mt-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2" open={!loggedIn}>
+            <summary className="cursor-pointer text-[11px] text-white/50">
+              خطوات آخر محاولة دخول ({loginTrace.length} خطوة) — اضغط للعرض/الإخفاء
+            </summary>
+            <ol className="mt-2 max-h-56 space-y-1 overflow-auto pe-1 font-mono text-[11px] leading-relaxed text-white/60" dir="ltr">
+              {loginTrace.map((line, i) => (
+                <li key={`${i}-${line.slice(0, 12)}`} className="whitespace-pre-wrap">
+                  {line}
+                </li>
+              ))}
+            </ol>
+            {loginFiles && (loginFiles.html || loginFiles.image) ? (
+              <div className="mt-2 text-[11px] text-amber-200/80">
+                ملفات التشخيص: {[loginFiles.html, loginFiles.image].filter(Boolean).join(" · ")}
+              </div>
+            ) : null}
+          </details>
+        ) : null}
+
+        {/* نوافذ الأتمتة: خلفية مرئية (الافتراضي) — الإخفاء الكامل بيكسر الدخول والصور */}
+        <div className="mt-3">
+          <Toggle
+            checked={settings.backgroundWindows !== false}
+            label="نوافذ المتصفح في الخلفية (من غير ما تاخد التركيز)"
+            hint="سيبها مفعّلة: النوافذ مرئية للموقع لكن مش بتسرق التركيز. الإخفاء الكامل بيخلّي نايس دير يرفض الدخول والصور تطلع فاضية."
+            onChange={async (v) => {
+              setSettings({ backgroundWindows: v });
+              const res = await bridge()?.setWindowMode({ background: v });
+              if (!res?.ok) logLine("warn", `تعذر تغيير وضع النوافذ: ${res?.error}`);
+            }}
+          />
         </div>
       </Card>
 

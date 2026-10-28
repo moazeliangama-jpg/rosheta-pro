@@ -214,6 +214,8 @@ export class SessionEngine {
       password: s.niceDeerPass,
       maxWorkers: this.requestedWorkers(),
     });
+    // وضع النوافذ: خلفية مرئية (افتراضي) — الإخفاء الكامل بيكسر الدخول والصور
+    await b.setWindowMode({ background: s.backgroundWindows !== false });
     // سقف النوافذ من إمكانيات الجهاز الحقيقية (رام وأنوية)
     const res = await b.setWorkers(this.requestedWorkers());
     const info = res?.data?.info;
