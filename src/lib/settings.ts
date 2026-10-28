@@ -37,5 +37,4 @@ export const defaultSettings: Settings = {
   errorReporting: true,
   lastReportDate: "",
   lastAutoSessionDate: "",
-  lastScanAt: 0,
 };

@@ -255,7 +255,6 @@ export interface Settings {
   errorReporting: boolean;
   lastReportDate: string;
   lastAutoSessionDate: string;
-  lastScanAt: number;
 }
 
 /** إحصائيات ساعة كاملة — بتتبني على أسبوع وبتقول أفضل وقت للتشغيل */

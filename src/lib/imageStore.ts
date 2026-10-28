@@ -70,6 +70,21 @@ export async function loadImage(id: string): Promise<string | null> {
   }
 }
 
+/** هل الصورة موجودة فعلًا في التخزين؟ (بدون تحميلها كاملة للحالة) */
+export async function hasImage(id: string): Promise<boolean> {
+  try {
+    const db = await openDb();
+    return await new Promise<boolean>((resolve) => {
+      const tx = db.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).count(id);
+      req.onsuccess = () => resolve((req.result || 0) > 0);
+      req.onerror = () => resolve(false);
+    });
+  } catch {
+    return false;
+  }
+}
+
 /**
  * ٥٤) حذف الصور الأقدم من ٣٠ يوم: مجلد الإكسل والصور بيكبر مع كل جلسة،
  * وتخزين صورة كل روشتة للأبد بيملّي الجهاز بلا داعي — الصورة بتخلص صلاحيتها أصلًا.

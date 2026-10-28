@@ -16,7 +16,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { useAppStore } from "../lib/store";
+import { flushSave, useAppStore } from "../lib/store";
 import { readPatientsFile } from "../lib/excel";
 import { groupByWorkplace } from "../lib/eligibility";
 import { PAYERS } from "../lib/payers";
@@ -407,10 +407,26 @@ export function SetupScreen({
           </button>
           <button
             className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-white/50 hover:bg-white/5"
+            title="بيقفل كل نوافذ نايس دير وواتساب المفتوحة (الجلسة بتفضل محفوظة)"
+            onClick={async () => {
+              const closed = await bridge()?.closeAll();
+              if (closed) logLine("ok", "اتقفلت كل نوافذ نايس دير وواتساب.");
+              else logLine("warn", "مفيش نوافذ مفتوحة تتقفل.");
+            }}
+          >
+            اقفل النوافذ
+          </button>
+          <button
+            className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-white/50 hover:bg-white/5"
             onClick={() => void bridge()?.openSearchSite()}
           >
             <Link2 className="mr-1 inline h-3 w-3" /> فتح الموقع للتأكد
           </button>
+          {hasDesktopBridge() ? (
+            <span className="ms-auto font-mono text-[11px] text-white/25">
+              نسخة سطح المكتب {bridge()?.version ?? "—"}
+            </span>
+          ) : null}
         </div>
 
         {/* سبب فشل الدخول الحقيقي — خطوات المحاولة زي ما حصلت بالظبط */}
@@ -839,17 +855,26 @@ export function SetupScreen({
             dir="ltr"
           />
           <Field
-            label="أرقام الاستقبال"
+            label="أرقام استقبال ملخص الموافقين (واتساب)"
             value={settings.receptionNumbers}
             onChange={(e) => setSettings({ receptionNumbers: e.target.value })}
             placeholder={"201000000000,201111111111"}
             dir="ltr"
-            hint="مفصولة بفاصلة — بتستقبل إكسل الموافقين"
+            hint="أرقام مصرية مفصولة بفاصلة — بيوصلهم «ملخص الموافقين» من شاشة التواصل والإرسال، والتأكيد إن الرسالة ظهرت"
           />
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button variant="ghost" onClick={() => logLine("ok", "الإعداد بيتحفظ تلقائيًا على الجهاز.")}>
-            <Save className="h-4 w-4" /> حفظ
+          <Button
+            variant="ghost"
+            title="بيكتب الحالة على القرص فورًا (الحفظ التلقائي بيعمل كده لوحده بعد كل تغيير)"
+            onClick={() => {
+              const st = flushSave();
+              const time = st.savedAt ? new Date(st.savedAt).toLocaleTimeString("ar-EG") : nowTime();
+              logLine("ok", `اتحفظ على الجهاز في ${time}${st.dirty ? " (فيه تغييرات لسه بتتكتب)" : ""}.`);
+              toastLib.ok(`الإعداد محفوظ على القرص — ${time}`);
+            }}
+          >
+            <Save className="h-4 w-4" /> حفظ الآن
           </Button>
           <Button
             variant="muted"

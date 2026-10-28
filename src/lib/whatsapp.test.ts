@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildApprovedSummary,
   buildOutreachQueue,
   classifyReply,
   isSameReply,
   jitteredDelay,
+  parseReceptionNumbers,
   selectSendable,
   sentToday,
   validatePhone,
@@ -216,4 +218,35 @@ test("الرسالة اللي فشلت بتتعاد تاني (مش بتتحسب 
   assert.equal(queue.length, 1, "رسالة فاشلة المفروض تتعاد");
   const sent = [{ ...failed[0], status: "sent" as const }];
   assert.equal(buildOutreachQueue([c], {}, defaultSettings, sent).length, 0);
+});
+
+test("أرقام استقبال: بتتقري بفواصل مختلفة وبتتوحّد للأرقام الدولية", () => {
+  const { numbers, invalid } = parseReceptionNumbers("01000000001, 01000000001؛ 01100000002\n01200000003");
+  assert.deepEqual(numbers, ["201000000001", "201100000002", "201200000003"]);
+  assert.deepEqual(invalid, []);
+});
+
+test("أرقام استقبال: الأرقام الغلط بتتبلّغ مش بتتجاهل", () => {
+  const { numbers, invalid } = parseReceptionNumbers("123، 01000000001");
+  assert.deepEqual(numbers, ["201000000001"]);
+  assert.deepEqual(invalid, ["123"]);
+});
+
+test("ملخص الموافقين: فيه العدد والأسماء والساب وبيتقطع عند الحد", () => {
+  const rows = Array.from({ length: 40 }, (_, i) => ({
+    name: `مريض ${i + 1}`,
+    sab: `1000${i}`,
+    phone: "201000000001",
+  }));
+  const text = buildApprovedSummary({ workplace: "صيدلية النور", date: "2026-10-28", rows, maxLen: 600 });
+  assert.match(text, /ملخص الموافقين — صيدلية النور/);
+  assert.match(text, /عدد الموافقين: 40/);
+  assert.match(text, /ساب 1000/);
+  assert.ok(text.length <= 700, `الملخص أطول من الحد: ${text.length}`);
+  assert.match(text, /حالة كمان في إكسل الموافقين/);
+});
+
+test("ملخص الموافقين: من غير حالات بيقول كده صريح", () => {
+  const text = buildApprovedSummary({ date: "2026-10-28", rows: [] });
+  assert.match(text, /مفيش حالات موافق عليها/);
 });

@@ -201,3 +201,66 @@ export function selectSendable(
 export function isSameReply(m: OutreachMessage, text: string) {
   return Boolean(m.replyText) && m.replyText === text;
 }
+
+/**
+ * أرقام الاستقبال اللي بتوصلها رسالة ملخص الموافقين.
+ * بتتقري من الإعداد كنص واحد مفصول بفاصلة/فاصلة عربية/فاصلة منقوطة/مسافة/سطر،
+ * وكل رقم بيتحقق بنفس قواعد أرقام المرضى — رقم غلط بيتبلّغ عنه بدل ما يتجاهله بصمت.
+ */
+export function parseReceptionNumbers(raw: string): { numbers: string[]; invalid: string[] } {
+  const parts = String(raw || "")
+    .split(/[,;،\n\r\t ]+/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const numbers: string[] = [];
+  const invalid: string[] = [];
+  for (const part of parts) {
+    const check = validatePhone(part);
+    if (!check.ok) {
+      invalid.push(part);
+      continue;
+    }
+    if (!numbers.includes(check.phone)) numbers.push(check.phone);
+  }
+  return { numbers, invalid };
+}
+
+/**
+ * نص ملخص الموافقين اللي بيتبعت لأرقام الاستقبال على واتساب.
+ *
+ * ليه نص مش ملف إكسل؟ لأن الإرسال اللي بيتأكد منه البرنامج هو رسالة نصية
+ * (بيتأكد إنها ظهرت في المحادثة قبل ما يقول «تم»). الإكسل بيتمسح/يتبعت
+ * من مكانه اللي على الجهاز.
+ */
+export function buildApprovedSummary(opts: {
+  workplace?: string;
+  date: string;
+  rows: Array<{ name: string; sab: string; phone?: string; kind?: string }>;
+  maxLen?: number;
+}): string {
+  const maxLen = Math.max(400, opts.maxLen ?? 3500);
+  const head = [
+    `✅ ملخص الموافقين${opts.workplace ? ` — ${opts.workplace}` : ""}`,
+    `📅 ${opts.date}`,
+    `عدد الموافقين: ${opts.rows.length}`,
+  ].join("\n");
+
+  const lines: string[] = [];
+  let used = head.length;
+  let dropped = 0;
+  for (const row of opts.rows) {
+    const line = `• ${row.name || "بدون اسم"} — ساب ${row.sab}${row.phone ? ` — ${row.phone}` : ""}${
+      row.kind ? ` (${row.kind})` : ""
+    }`;
+    if (used + line.length + 1 > maxLen) {
+      dropped += 1;
+      continue;
+    }
+    lines.push(line);
+    used += line.length + 1;
+  }
+
+  const tail = dropped ? `\n…و${dropped} حالة كمان في إكسل الموافقين على الجهاز.` : "";
+  if (!lines.length) return `${head}\nمفيش حالات موافق عليها لسه.`;
+  return `${head}\n${lines.join("\n")}${tail}`;
+}

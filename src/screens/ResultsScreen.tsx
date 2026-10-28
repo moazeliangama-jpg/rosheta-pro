@@ -13,11 +13,13 @@ import {
 import { useAppStore } from "../lib/store";
 import { orderedCases, monthlyList } from "../lib/engine";
 import {
+  buildApprovedSummary,
   buildOutreachQueue,
   classifyReply,
   isSameReply,
   jitteredDelay,
   replyStats,
+  parseReceptionNumbers,
   selectSendable,
   sentToday,
   validatePhone,
@@ -54,7 +56,7 @@ export function ResultsScreen() {
   const logLine = useAppStore((s) => s.logLine);
   const setScreen = useAppStore((s) => s.setScreen);
 
-  const [busy, setBusy] = useState<"build" | "send" | "sync" | null>(null);
+  const [busy, setBusy] = useState<"build" | "send" | "sync" | "reception" | null>(null);
   const [sendProgress, setSendProgress] = useState({ done: 0, total: 0 });
   const stopRef = useRef(false);
 
@@ -127,6 +129,56 @@ export function ResultsScreen() {
   };
 
   /** تصدير حقيقي: الملف بيتكتب على القرص وبيرجع مساره، ومفيش «تم» من غير دليل */
+  /**
+   * ملخص الموافقين لأرقام الاستقبال على واتساب — إرسال حقيقي مُتحقَّق.
+   * كل رقم بيتحقق الأول، وكل رسالة بتتحسب نجحت بس لما تظهر في المحادثة.
+   */
+  const sendReceptionSummary = async () => {
+    const b = bridge();
+    if (!b) {
+      logLine("warn", "نسخة سطح المكتب مطلوبة لإرسال واتساب.");
+      return;
+    }
+    const { numbers, invalid } = parseReceptionNumbers(settings.receptionNumbers);
+    if (invalid.length) logLine("warn", `أرقام استقبال غير صالحة اتخطّت: ${invalid.join("، ")}`);
+    if (!numbers.length) {
+      logLine("warn", "مفيش أرقام استقبال صالحة — اكتبها في الإعداد (أرقام مصرية مفصولة بفاصلة).");
+      return;
+    }
+    const approved = outreach.filter((m) => m.reply === "approved");
+    if (!approved.length) {
+      logLine("warn", "مفيش موافقين لسه — زامن الردود الأول.");
+      return;
+    }
+    const text = buildApprovedSummary({
+      workplace: settings.workplace,
+      date: dateKey(),
+      rows: approved.map((m) => ({
+        name: m.name || "",
+        sab: m.sab,
+        phone: m.phone,
+        kind: m.kind === "monthly" ? "شهري" : "بها دواء",
+      })),
+    });
+    setBusy("reception");
+    let okCount = 0;
+    for (const phone of numbers) {
+      const res = await b.wa.send({ phone, text });
+      if (res.ok) {
+        okCount += 1;
+        logLine("ok", `ملخص الموافقين اتبعت لـ ${phone} (متأكد إنه ظهر في المحادثة).`);
+      } else {
+        logLine("error", `إرسال الملخص لـ ${phone} فشل: ${res.error ?? "سبب غير معروف"}`);
+      }
+      if (phone !== numbers[numbers.length - 1]) await new Promise((r) => setTimeout(r, 1500));
+    }
+    setBusy(null);
+    logLine(
+      okCount === numbers.length ? "ok" : "warn",
+      `ملخص الموافقين: ${okCount} من ${numbers.length} رقم استقبال.`,
+    );
+  };
+
   const exportApprovedFile = async () => {
     const x = await import("../lib/excel");
     reportSave(await x.exportApproved(all, outreach), "تصدير إكسل الموافقين");
@@ -193,6 +245,14 @@ export function ResultsScreen() {
           </Button>
           <Button variant="ghost" onClick={() => void exportDrugsFile()}>
             <Download className="h-4 w-4" /> إكسل بها دواء
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={() => void sendReceptionSummary()}
+            disabled={busy === "reception" || !stats.approved}
+            title="بيبعت ملخص الموافقين لأرقام الاستقبال اللي في الإعداد — واتساب، مع تأكيد إن الرسالة ظهرت"
+          >
+            <MessageCircle className={cn("h-4 w-4", busy === "reception" && "animate-pulse")} /> ملخص الموافقين
           </Button>
           <Button
             variant="ghost"

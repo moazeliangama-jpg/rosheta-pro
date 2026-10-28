@@ -1621,8 +1621,10 @@ async function captureScreenshot(win, { forceVisible = false } = {}) {
   } finally {
     if (shown) {
       try {
-        win.hide();
         if (original) win.setBounds(original);
+        // النافذة بترجع للخلفية (مرئية من غير تركيز) مش بتتقفل تمامًا —
+        // الإخفاء الكامل بيمنع الرسم في اللقطات اللي بعدها
+        presentInBackground(win, 0);
       } catch {
         /* تجاهل */
       }
@@ -2368,10 +2370,6 @@ ipcMain.handle("app:load-credentials", async () => {
   return res;
 });
 
-ipcMain.handle("app:clear-credentials", async () => {
-  credentials = { username: "", password: "" };
-  return clearCredentialsSecure();
-});
 
 ipcMain.handle("app:backup", async (_e, payload) => {
   try {
@@ -2659,19 +2657,33 @@ ipcMain.handle("app:save-file", async (_e, payload) => {
 ipcMain.handle("nd:logout-everything", async () => {
   setBusy(false);
   await workers.closeAll();
+  if (loginWin && !loginWin.isDestroyed()) {
+    try {
+      await loginWin.webContents.session.clearStorageData();
+    } catch {
+      /* تجاهل */
+    }
+    loginWin.destroy();
+  }
+  loginWin = null;
   await session.fromPartition(ND_PARTITION).clearStorageData();
   deleteResults.clear();
+  loginTrace = [];
   return { ok: true };
 });
 
 ipcMain.handle("nd:close-all", async () => {
+  const before = BrowserWindow.getAllWindows().length;
   await workers.closeAll();
   await captures.closeAll();
   await deleters.closeAll();
   deleteJobs.length = 0;
   if (waWin && !waWin.isDestroyed()) waWin.destroy();
   waWin = null;
-  return true;
+  // نافذة الدخول المرئية بتتقفل كمان — الجلسة محفوظة في الـ partition
+  if (loginWin && !loginWin.isDestroyed()) loginWin.destroy();
+  loginWin = null;
+  return before > 1;
 });
 
 ipcMain.handle("app:open-search-site", async () => {
@@ -2686,11 +2698,6 @@ ipcMain.handle("app:open-search-site", async () => {
   }
 });
 
-ipcMain.handle("app:open-external", async (_e, url) => {
-  if (!SEC.isSafeExternalUrl(url)) return { ok: false, error: "رابط غير مسموح" };
-  await shell.openExternal(url);
-  return { ok: true };
-});
 
 // ---------------------------------------------------------------------------
 // IPC — واتساب

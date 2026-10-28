@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Info, ShieldAlert, XCircle } from "lucide-react";
 import { useAppStore } from "../lib/store";
 import { hasDesktopBridge } from "../lib/provider";
+import { imageAvailable } from "../lib/imageCache";
 import { Badge, Card, SectionTitle } from "./ui";
 import { BugReportPanel } from "./BugReportPanel";
 
@@ -16,11 +17,48 @@ export function DiagnosticsPanel() {
   const loggedIn = useAppStore((s) => s.niceDeerLoggedIn);
   const session = useAppStore((s) => s.session);
 
+  /**
+   * الحالة المحفوظة مش فيها `dataUrl` (الصور في IndexedDB)، فالحكم على «الصورة
+   * موجودة ولا لأ» لازم يبقى بفحص التخزين نفسه — من غير كده كل الصور بتتحسب ضايعة
+   * بعد أي إعادة تشغيل وده تشخيص كاذب.
+   */
+  const checkIds = useMemo(
+    () =>
+      Object.values(cases)
+        .filter((c) => c.rx.status === "ready" && !c.rx.dataUrl)
+        .map((c) => c.id)
+        .sort()
+        .join(","),
+    [cases],
+  );
+  const [missing, setMissing] = useState<Set<string>>(() => new Set());
+
+  useEffect(() => {
+    let alive = true;
+    const ids = checkIds ? checkIds.split(",") : [];
+    if (!ids.length) {
+      setMissing(new Set());
+      return;
+    }
+    void (async () => {
+      const gone = new Set<string>();
+      for (const id of ids) {
+        if (!alive) return;
+        if (!(await imageAvailable(id))) gone.add(id);
+      }
+      if (alive) setMissing(gone);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [checkIds, imagesHydrated]);
+
   const checks = useMemo(() => {
     const list = Object.values(cases);
-    const ready = list.filter((c) => c.rx.status === "ready" && c.rx.dataUrl);
+    const withImage = (c: (typeof list)[number]) => Boolean(c.rx.dataUrl) || !missing.has(c.id);
+    const ready = list.filter((c) => c.rx.status === "ready" && withImage(c));
     const failed = list.filter((c) => c.rx.status === "failed");
-    const stale = list.filter((c) => c.rx.status === "ready" && !c.rx.dataUrl);
+    const stale = list.filter((c) => c.rx.status === "ready" && !withImage(c));
     const methods = [...new Set(ready.map((c) => c.rx.method).filter(Boolean))];
 
     return [
@@ -92,7 +130,7 @@ export function DiagnosticsPanel() {
           : "لسه مفيش تشغيل.",
       },
     ] as const;
-  }, [cases, settings, imagesHydrated, loggedIn, session]);
+  }, [cases, settings, imagesHydrated, loggedIn, session, missing]);
 
   return (
     <div className="space-y-4">

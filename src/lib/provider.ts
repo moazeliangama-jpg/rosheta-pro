@@ -117,7 +117,6 @@ export interface RoshettaBridge {
   credentials: {
     save: (p: { username: string; password: string }) => Promise<BridgeResult>;
     load: () => Promise<BridgeResult<{ username: string; password: string } | null>>;
-    clear: () => Promise<BridgeResult>;
   };
   login: (p?: { username?: string; password?: string }) => Promise<
     BridgeResult & { already?: boolean; verified?: boolean; state?: string; trace?: string[]; files?: Record<string, string> | null; ms?: number }
@@ -171,7 +170,6 @@ export interface RoshettaBridge {
   >;
   openExportFolder: () => Promise<BridgeResult<{ dir: string }>>;
   notify: (p: { title: string; body: string }) => Promise<BridgeResult>;
-  openExternal: (url: string) => Promise<boolean>;
 }
 
 declare global {
