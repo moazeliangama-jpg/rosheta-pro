@@ -27,7 +27,9 @@ test("النافذة فيها شريط متصفح فوق محتوى حقيقي (
   assert.match(main, /preload:\s*CHROME_PRELOAD/, "شريط المتصفح له preload خاص");
   assert.match(main, /loadFile\(CHROME_HTML\)/, "شريط المتصفح بيتحمّل فعليًا");
   assert.match(main, /CHROME_HEIGHT/, "ارتفاع الشريط مستخدم في تخطيط المحتوى");
-  assert.match(main, /setBounds\(\{\s*x:\s*0,\s*y:\s*CHROME_HEIGHT/, "المحتوى بيتحط تحت الشريط مش فوقه");
+  // المحتوى بيتحط تحت الشريط — ولو الشريط ما اتحمّلش بياخد النافذة كلها
+  assert.match(main, /const top = win\.__rpChromeOk \? CHROME_HEIGHT : 0/);
+  assert.match(main, /setBounds\(\{\s*x:\s*0,\s*y:\s*top/, "المحتوى بيتحط تحت الشريط مش فوقه");
 });
 
 test("أزرار الشريط بتنفّذ أوامر حقيقية على المحتوى", () => {
@@ -58,7 +60,7 @@ test("شورت كت المتصفح شغالة والمحتوى هو اللي م�
 });
 
 test("كل نوافذ الأتمتة ليها جلسات منفصلة", () => {
-  assert.match(main, /const partition = `persist:nd-\$\{this\.name\}-\$\{/, "كل نافذة لازم تأخد partition خاص");
+  assert.match(main, /const candidate = `persist:nd-\$\{this\.name\}-/, "كل نافذة لازم تأخد partition خاص");
   // نسخ الهوية بس — كوكي الجلسة بيفضل مستقل لكل نافذة
   assert.match(main, /SESSION_COOKIE_RE/, "لازم فلتر يفصل كوكي الهوية عن كوكي الجلسة");
   assert.match(main, /session\.fromPartition\(ND_PARTITION\)/, "مصدر الهوية جلسة الدخول الأساسية");
@@ -100,7 +102,10 @@ test("الأتمتة بتشتغل على محتوى الصفحة مش على ق�
 
 test("متصفح واحد بيمشي الساب كله وبعدها بيتحرر", () => {
   assert.match(main, /win\.__rpSab = String\(sab\)/, "البحث لازم يربط الساب بالمتصفح");
-  assert.match(main, /workers\.withPref\(\s*\(win\) => win\.__rpSab === sab/, "الصور بتكمل على نفس متصفح الساب");
+  // الحجز بالـlease: البحث بيحجز، والصور بتكمل على نفس النافذة المحجوزة
+  assert.match(main, /function leasedWindowForSab\(/, "الصور بتكمل على نفس متصفح الساب");
+  const imgHandler = main.slice(main.indexOf('ipcMain.handle("nd:form-image"'));
+  assert.match(imgHandler.slice(0, 900), /workers\.withWindow\(leased/, "الصور بتكمل على نفس متصفح الساب");
   assert.match(main, /ipcMain\.handle\("nd:release-sab"/, "لازم تحرير المتصفح بعد خلاص الساب");
   assert.match(main, /if \(win\.__rpSab && !win\.__rpSabDone\) return;/, "ممنوع تقفيل متصفح في نص شغل ساب");
   assert.match(engine, /releaseSab\(\{ sab: patient\.sab \}\)/, "المحرّك لازم يحرر المتصفح بعد استمارات الساب");
@@ -165,4 +170,66 @@ test("الجرد بيقرا كل صفوف الجدولين (مش أول صفحة
   assert.match(body, /rows\(\{ search: 'applied' \}\)\.nodes\(\)/, "القراءة من DataTables API بتشمل كل الصفحات");
   assert.match(body, /for \(const tr of rpRows\(t1\)\)/, "جدول Pre-Approvals بيستخدم قارئ كل الصفوف");
   assert.match(body, /for \(const tr of rpRows\(t2\)\)/, "جدول Claims بيستخدم قارئ كل الصفوف");
+});
+
+test("كل ساب محجوز على متصفح واحد من البحث لآخر استمارة", () => {
+  assert.match(main, /const sabWindowLease = new Map\(\)/, "لازم جدول حجز ساب ← متصفح");
+  assert.match(main, /function leaseWindowForSab\(/, "حجز المتصفح للساب");
+  assert.match(main, /function leasedWindowForSab\(/, "قراءة المتصفح المحجوز");
+  assert.match(main, /function releaseWindowLease\(/, "تحرير المتصفح بعد الساب");
+
+  // البحث بيحجز، والصورة بتكمل على نفس المتصفح المحجوز
+  const search = main.slice(main.indexOf("async function runSearchOn"));
+  assert.match(search.slice(0, 2000), /leaseWindowForSab\(sab, win\)/, "البحث لازم يحجز المتصفح للساب");
+  const image = main.slice(main.indexOf("async function runImageOn"));
+  assert.match(image.slice(0, 900), /leaseWindowForSab\(payload\.sab, win\)/, "الصورة بتكمل على متصفح الساب");
+  const handler = main.slice(main.indexOf('ipcMain.handle("nd:form-image"'));
+  assert.match(handler.slice(0, 900), /workers\.withWindow\(leased/, "لازم التشغيل على نفس النافذة المحجوزة");
+  assert.match(handler.slice(0, 900), /leasedWindowForSab\(sab\)/);
+
+  // ممنوع تسليم نافذة محجوزة لساب تاني
+  const acquire = main.slice(main.indexOf("async acquire("));
+  assert.match(acquire.slice(0, 800), /!w\.__rpLease/, "الحوض ممنوع يسلّم نافذة محجوزة");
+  assert.match(main, /ipcMain\.handle\("nd:release-sab"/, "لازم قناة تحرير المتصفح");
+});
+
+test("لو شريط المتصفح ما اتحمّلش مفيش شريط أبيض فاضي", () => {
+  assert.match(main, /__rpChromeOk/, "لازم معرفة حالة تحميل الشريط");
+  const layout = main.slice(main.indexOf("function layoutContent(win)"));
+  assert.match(layout.slice(0, 900), /const top = win\.__rpChromeOk \? CHROME_HEIGHT : 0/, "المحتوى ياخد النافذة كلها لو الشريط مش محمّل");
+});
+
+test("الإرجاع بيتأكد من الدخول في نافذته قبل ما يدوّر على #btn-DeleteClaim", () => {
+  const start = main.indexOf("async function runDeleteJob");
+  assert.ok(start > 0, "مش لاقي runDeleteJob");
+  const body = main.slice(start, start + 3000);
+  const ensureAt = body.indexOf('await ensureSession(win, credentials)');
+  const loadAt = body.indexOf("await safeLoad(win, candidate");
+  assert.ok(ensureAt > 0, "نافذة الإرجاع لازم تتأكد من الجلسة");
+  assert.ok(loadAt > 0, "لازم تحميل صفحة المطالبة");
+  assert.ok(ensureAt < loadAt, "ضمان الدخول لازم يحصل قبل تحميل صفحة الإرجاع");
+  assert.match(body, /return "login"/, "من غير جلسة مفيش ضغطة حذف — الحالة تتقال");
+  assert.match(main, /نافذة الإرجاع مش داخلة بحساب/, "سبب الفشل لازم يظهر للمستخدم");
+});
+
+test("مفيش نافذتين حيّتين على نفس جلسة المتصفح (partition)", () => {
+  const create = main.slice(main.indexOf("  create() {"), main.indexOf("  /** تشغيل على نافذة **محددة**"));
+  assert.match(create, /const taken = new Set\(this\.windows\.map\(\(w\) => w && w\.__rpPartition\)/);
+  assert.match(create, /if \(!taken\.has\(candidate\)\)/);
+  assert.match(create, /persist:nd-\$\{this\.name\}-x\$\{this\.extraPartitions\}/, "لو الاثنا عشر مشغولين: جلسة جديدة");
+});
+
+test("قفل البرنامج بيلغي أي إرجاع معلّق (مفيش حذف بعد الإلغاء)", () => {
+  const quit = main.slice(main.indexOf('app.on("before-quit"'));
+  assert.match(quit.slice(0, 300), /cancelPendingDeletes\(/);
+});
+
+test("المتصفح بيتحرر من الساب حتى لو الساب مالوش استمارات أو اتلغى", () => {
+  const start = engine.indexOf("private async pipelinePhase");
+  assert.ok(start > 0);
+  const block = engine.slice(start, start + 3000);
+  const finallyAt = block.indexOf("} finally {");
+  const releaseAt = block.indexOf("releaseSab({ sab: patient.sab })");
+  assert.ok(finallyAt > 0, "التحرير لازم يكون في finally");
+  assert.ok(releaseAt > finallyAt, "releaseSab لازم يكون جوه finally");
 });

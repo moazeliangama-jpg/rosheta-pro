@@ -846,11 +846,14 @@ function layoutContent(win) {
   if (!win || win.isDestroyed() || !win.__rpView) return;
   try {
     const [width, height] = win.getContentSize();
+    // لو شريط المتصفح مش محمّل (فشل تحميل ملف الشريط) بنخلي المحتوى ياخد
+    // النافذة كلها — شريط أبيض فاضي فوق الصفحة كان بيبوّظ شكل «المتصفح».
+    const top = win.__rpChromeOk ? CHROME_HEIGHT : 0;
     win.__rpView.setBounds({
       x: 0,
-      y: CHROME_HEIGHT,
+      y: top,
       width: Math.max(0, width),
-      height: Math.max(0, height - CHROME_HEIGHT),
+      height: Math.max(0, height - top),
     });
   } catch {
     /* تجاهل */
@@ -906,8 +909,20 @@ function createBrowserWindow({ partition = ND_PARTITION, title = "روشتة ب�
       win.__rpContent = view.webContents;
       layoutContent(win);
       wireChrome(win);
+      win.__rpChromeOk = false;
+      win.webContents.on("did-finish-load", () => {
+        win.__rpChromeOk = true;
+        layoutContent(win);
+        pushChromeState(win);
+      });
+      win.webContents.on("did-fail-load", () => {
+        win.__rpChromeOk = false;
+        layoutContent(win);
+      });
       win.loadFile(CHROME_HTML).catch(() => {
-        /* لو الشريط مش قادر يتحمّل، المحتوى شغال عادي */
+        // لو ملف الشريط مش موجود/مش مقروء: المحتوى ياخد النافذة كلها
+        win.__rpChromeOk = false;
+        layoutContent(win);
       });
       win.on("closed", () => {
         try {
@@ -1067,8 +1082,28 @@ class WindowPool {
     // من غير العزل ده، نوافذ بتجرد سابات مختلفة بتتقاسم نفس جلسة السيرفر،
     // فنتائج ساب بتتبهدل بنتائج ساب تاني بيتجرد في نفس اللحظة.
     const slot = this.windows.length + 1;
-    this.slotCounter = (this.slotCounter || 0) + 1;
-    const partition = `persist:nd-${this.name}-${((this.slotCounter - 1) % 12) + 1}`;
+    /**
+     * اختيار الجلسة: دور على أول رقم من ١ لـ١٢ **مش مستخدم دلوقتي**.
+     * قبل كده كان الرقم بيتكرر كل ١٢ نافذة، فممكن نافذتين شغالين في نفس
+     * اللحظة ياخدوا نفس الـpartition — يعني نفس الكوكيز ونفس جلسة السيرفر،
+     * وده بالظبط اللي بيسرّب نتائج ساب لساب تاني. الرقم المتحرك لقيود الحجم
+     * بس، والشرط الحقيقي إن مفيش نافذتين حيّتين على نفس الجلسة.
+     */
+    const taken = new Set(this.windows.map((w) => w && w.__rpPartition).filter(Boolean));
+    let partition = "";
+    for (let i = 0; i < 12; i += 1) {
+      this.slotCounter = (this.slotCounter || 0) + 1;
+      const candidate = `persist:nd-${this.name}-${((this.slotCounter - 1) % 12) + 1}`;
+      if (!taken.has(candidate)) {
+        partition = candidate;
+        break;
+      }
+    }
+    if (!partition) {
+      // كل الـ١٢ مشغولين: جلسة جديدة تمامًا بدل ما نتشارك جلسة حد
+      this.extraPartitions = (this.extraPartitions || 0) + 1;
+      partition = `persist:nd-${this.name}-x${this.extraPartitions}`;
+    }
     const win = createBrowserWindow({
       partition,
       title: `روشتة برو — نافذة ${this.name} #${slot}`,
@@ -1101,8 +1136,23 @@ class WindowPool {
     return win;
   }
 
+  /** تشغيل على نافذة **محددة** (محجوزة لساب) مع انتظار تحررها */
+  async withWindow(win, fn, timeoutMs = 120000) {
+    if (!win || win.isDestroyed()) throw new Error("النافذة المحجوزة اتقفلت");
+    const started = Date.now();
+    while (this.busy.has(win) && Date.now() - started < timeoutMs) await sleep(25);
+    if (win.isDestroyed()) throw new Error("النافذة المحجوزة اتقفلت");
+    this.busy.add(win);
+    try {
+      return await fn(win);
+    } finally {
+      this.release(win);
+    }
+  }
+
   /** نافذة اتقفلت أو عملت عمليات كتير → نشيلها من البركة */
   destroy(win) {
+    if (win && win.__rpLease) releaseWindowLease(win.__rpLease);
     const i = this.windows.indexOf(win);
     if (i >= 0) this.windows.splice(i, 1);
     this.busy.delete(win);
@@ -1119,7 +1169,9 @@ class WindowPool {
 
   /** تقليل النوافذ الخاملة لما الذاكرة تقرب تخلص أو بعد فترة سكون */
   prune({ force = false } = {}) {
-    const free = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed() && !(w.__rpSab && !w.__rpSabDone));
+    const free = this.windows.filter(
+      (w) => !this.busy.has(w) && !w.isDestroyed() && !w.__rpLease && !(w.__rpSab && !w.__rpSabDone),
+    );
     const freeMemMb = os.freemem() / 1024 ** 2;
     const keep = force ? 0 : Math.min(free.length, 1);
     let removed = 0;
@@ -1137,8 +1189,9 @@ class WindowPool {
 
   async acquire(timeoutMs = 180000) {
     const ready = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed());
-    // نافذة فاضية و«حرة» الأول (مش شايلة ساب شغال) — العزل في الشغل مش في الشكل بس
-    const free = ready.find((w) => !(w.__rpSab && !w.__rpSabDone)) || ready[0];
+    // **ممنوع** ناخد نافذة محجوزة لساب شغال — دي متصفح بيتكلم مع سيرفر بجلسة ساب تاني
+    // نافذة حرة الأول، وبعدها أي نافذة غير محجوزة، وبعدها نفتح واحدة جديدة
+    const free = ready.find((w) => !w.__rpLease && !(w.__rpSab && !w.__rpSabDone)) || ready.find((w) => !w.__rpLease);
     if (free) {
       this.busy.add(free);
       return free;
@@ -1150,7 +1203,10 @@ class WindowPool {
     }
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const w = this.windows.find((x) => !this.busy.has(x) && !x.isDestroyed());
+      // وممنوع كمان في الانتظار: نافذة محجوزة لساب شغال مش بتتسلّم لحد تاني
+      const w = this.windows.find(
+        (x) => !this.busy.has(x) && !x.isDestroyed() && !x.__rpLease,
+      );
       if (w) {
         this.busy.add(w);
         return w;
@@ -1227,6 +1283,41 @@ class WindowPool {
     this.windows = [];
     this.busy.clear();
   }
+}
+
+/**
+ * حجز نافذة لكل ساب: من أول بحث لحد آخر استمارة.
+ *
+ * ليه ده مهم؟ لأن bridge calls بتيجي من المحرك أوبالتوازي (سابات مختلفة في
+ * نفس الوقت). من غير الحجز، احتمال إن استمارة ساب تتجرد على نافذة تانية غير
+ * اللي عملت البحث — فتضيع نتايج البحث ويبدأ الساب من صفحة فاضية.
+ * بالحجز ده: **كل متصفح يمشي ساب واحد بس** من أوله لآخره.
+ */
+const sabWindowLease = new Map();
+
+function leaseWindowForSab(sab, win) {
+  const key = String(sab);
+  sabWindowLease.set(key, win);
+  if (win && !win.isDestroyed()) win.__rpLease = key;
+  return win;
+}
+
+function leasedWindowForSab(sab) {
+  const key = String(sab);
+  const win = sabWindowLease.get(key);
+  if (!win || win.isDestroyed()) {
+    sabWindowLease.delete(key);
+    return null;
+  }
+  return win;
+}
+
+function releaseWindowLease(sab) {
+  const key = String(sab);
+  const win = sabWindowLease.get(key) || null;
+  sabWindowLease.delete(key);
+  if (win && !win.isDestroyed() && win.__rpLease === key) win.__rpLease = null;
+  return win;
 }
 
 const workers = new WindowPool({ name: "workers", max: Math.min(5, MAX_WORKERS), keepState: true });
@@ -1330,6 +1421,20 @@ async function runDeleteJob(job) {
         // صفحة الإرجاع مش محتاجة صور — بنمنعها لتسريع التحميل
         setResourceMode(win, "search");
         labelWindow(win, `ساب ${job.sab} — إرجاع ${job.reference}`);
+        /**
+         * الإرجاع بيحصل في نافذة من بركة مستقلة (جلسة خاصة). من غير ضمان
+         * الدخول، الصفحة كانت بتفتح على صفحة الدخول → مفيش #btn-DeleteClaim
+         * → الإرجاع يتسجّل «not-found» والاستمارة تفضل مفتوحة في الصرف
+         * من غير ما حد يعرف. الضمان هنا قبل أي تحميل.
+         */
+        let sessionState = "ok";
+        try {
+          sessionState = await ensureSession(win, credentials);
+        } catch (err) {
+          capLog(`إرجاع ${job.reference}`, `ضمان الجلسة فشل: ${String(err?.message || err).slice(0, 120)}`);
+          sessionState = "logged-out";
+        }
+        if (sessionState === "logged-out") return "login";
         for (const candidate of job.candidates) {
           if (!candidate || candidate === "main") continue;
           const loaded = await safeLoad(win, candidate, TIMEOUTS.delete);
@@ -1354,6 +1459,17 @@ async function runDeleteJob(job) {
       },
       1500,
     );
+    if (state === "login") {
+      // الصفحة مفتحتش أصلًا بجلسة داخلة → مفيش أي ضغطة حذف، والحالة تتقال بصراحة
+      deleteResults.set(job.key, {
+        state: "error",
+        error: "نافذة الإرجاع مش داخلة بحساب — الاستمارة لسه مفتوحة في الصرف",
+        at: Date.now(),
+        ms: Date.now() - started,
+      });
+      if (!job.retried) deleteRetry.set(job.key, { ...job, retried: true });
+      return;
+    }
     deleteResults.set(job.key, { state, at: Date.now(), ms: Date.now() - started });
     if (state === "error" || state === "not-found" || state === "unverified") {
       if (!job.retried) deleteRetry.set(job.key, { ...job, retried: true });
@@ -3301,45 +3417,55 @@ ipcMain.handle("nd:status", async () => {
   }
 });
 
+/** بحث ساب على نافذة **محددة** — النافذة دي بتتحجز للساب بعد كده */
+async function runSearchOn(win, { sab, payerId, payerName, timeoutMs }) {
+  lastSearchWin = win;
+  // ربط النافذة بالساب **قبل** أي خطوة: كل استمارات الساب بتكمل على
+  // نفس المتصفح ده، ونتايج بحثه بتفضل موجودة (من غير بحث جديد لكل استمارة)
+  win.__rpSab = String(sab);
+  win.__rpSabDone = false;
+  labelWindow(win, `ساب ${String(sab).slice(0, 20)} — بحث`);
+  await ensureSearchPage(win, credentials);
+  // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
+  const sessionState = await ensureSession(win, credentials);
+  let res;
+  try {
+    res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+  } catch (err) {
+    // الجلسة انتهت في نص الشغل: دخول تاني مرة واحدة بنفس النافذة وبعدها بحث
+    if (err && err.code === "NEED_LOGIN") {
+      traceStep(`الساب ${sab}: الجلسة انتهت — إعادة دخول في نفس النافذة`);
+      await loginOnce(win, credentials);
+      await ensureSearchPage(win, credentials);
+      res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+    } else if (err && err.code === "PRECONDITION") {
+      // النافذة مش على صفحة البحث (صفحة قديمة/مودال/تحويل) — تحميل جديد
+      // وإعادة المحاولة مرة واحدة بدل ما الساب يفشل على صفحة غلط.
+      traceStep(`الساب ${sab}: النافذة مش على صفحة البحث — تحميل جديد ومحاولة تانية`);
+      await safeLoad(win, SEARCH_URL, TIMEOUTS.pageLoad);
+      const ready = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+      if (!ready) throw err;
+      res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+    } else {
+      throw err;
+    }
+  }
+  leaseWindowForSab(sab, win);
+  return { ok: true, data: res, session: sessionState };
+}
+
 ipcMain.handle("nd:search", async (_e, payload) => {
   const { sab, payerId, payerName, timeoutMs } = payload || {};
   if (!sab) return { ok: false, error: "رقم الساب مطلوب" };
   const t0 = Date.now();
+  const job = { sab, payerId, payerName, timeoutMs };
   try {
-    return await workers.with(async (win) => {
-      lastSearchWin = win;
-      // ربط النافذة بالساب **قبل** أي خطوة: كل استمارات الساب بتكمل على
-      // نفس المتصفح ده، ونتايج بحثه بتفضل موجودة (من غير بحث جديد لكل استمارة)
-      win.__rpSab = String(sab);
-      win.__rpSabDone = false;
-      labelWindow(win, `ساب ${String(sab).slice(0, 20)} — بحث`);
-      await ensureSearchPage(win, credentials);
-      // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
-      const sessionState = await ensureSession(win, credentials);
-      let res;
-      try {
-        res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
-      } catch (err) {
-        // الجلسة انتهت في نص الشغل: دخول تاني مرة واحدة بنفس النافذة وبعدها بحث
-        if (err && err.code === "NEED_LOGIN") {
-          traceStep(`الساب ${sab}: الجلسة انتهت — إعادة دخول في نفس النافذة`);
-          await loginOnce(win, credentials);
-          await ensureSearchPage(win, credentials);
-          res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
-        } else if (err && err.code === "PRECONDITION") {
-          // النافذة مش على صفحة البحث (صفحة قديمة/مودال/تحويل) — تحميل جديد
-          // وإعادة المحاولة مرة واحدة بدل ما الساب يفشل على صفحة غلط.
-          traceStep(`الساب ${sab}: النافذة مش على صفحة البحث — تحميل جديد ومحاولة تانية`);
-          await safeLoad(win, SEARCH_URL, TIMEOUTS.pageLoad);
-          const ready = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
-          if (!ready) throw err;
-          res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
-        } else {
-          throw err;
-        }
-      }
-      return { ok: true, data: res, session: sessionState, ms: Date.now() - t0 };
-    });
+    // الساب ليه متصفح محجوز؟ نكمل عليه. لأ؟ ناخد نافذة حرة ونحجزها له.
+    const leased = leasedWindowForSab(sab);
+    const result = leased
+      ? await workers.withWindow(leased, (win) => runSearchOn(win, job))
+      : await workers.with((win) => runSearchOn(win, job));
+    return { ...result, ms: Date.now() - t0 };
   } catch (err) {
     // فشل البحث: بنحفظ الصفحة اللي كانت مفتوحة فعلًا (صورة + HTML) ونرفق مسارها
     const evidence = await saveWindowEvidence(lastSearchWin, `search-${SEC.sanitizeSab(sab) || "sab"}`);
@@ -3348,27 +3474,31 @@ ipcMain.handle("nd:search", async (_e, payload) => {
   }
 });
 
+/** استمارة واحدة على نافذة محددة (مع حجزها للساب) */
+async function runImageOn(win, payload) {
+  lastImageWin = win;
+  leaseWindowForSab(payload.sab, win);
+  return processForm(win, {
+    sab: payload.sab,
+    reference: payload.reference,
+    source: payload.source,
+    href: payload.href,
+    payerId: payload.payerId,
+    payerName: payload.payerName,
+    preventDelete: Boolean(payload.preventDelete),
+    credentials,
+  });
+}
+
 ipcMain.handle("nd:form-image", async (_e, payload) => {
-  const { sab, reference, source, payerId, payerName, preventDelete, href } = payload || {};
+  const { sab, reference } = payload || {};
   if (!sab || !reference) return { ok: false, error: "الساب والرقم المرجعي مطلوبين" };
   try {
-    return await workers.withPref(
-      (win) => win.__rpSab === sab,
-      (win) => {
-        lastImageWin = win;
-        return processForm(win, {
-        sab,
-        reference,
-        source,
-        href,
-        payerId,
-        payerName,
-          preventDelete: Boolean(preventDelete),
-          credentials,
-        });
-      },
-      6000,
-    );
+    // **نفس متصفح الساب** دايمًا: الصورة بتتفتح بجلسة سرڤر الساب، ونتايج
+    // بحثه لسه في نفس النافذة (من غير بحث جديد لكل استمارة).
+    const leased = leasedWindowForSab(sab);
+    if (leased) return await workers.withWindow(leased, (win) => runImageOn(win, payload));
+    return await workers.with((win) => runImageOn(win, payload));
   } catch (err) {
     const evidence = await saveWindowEvidence(lastImageWin, `image-${SEC.sanitizeSab(sab) || "sab"}`);
     const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
@@ -3377,23 +3507,26 @@ ipcMain.handle("nd:form-image", async (_e, payload) => {
 });
 
 /**
- * خلاص الساب: النافذة اللي شايلاه بترجع للحوض نضيفة، وعنوانها بيرجع عام.
- * مش تنظيف شكلي — ده اللي بيخلي «متصفح لكل ساب» حقيقي: الاستمارة اللي بعدها
- * لساب تاني بتبدأ من صفحة بحث نظيفة مش من نص شغل ساب سابق.
+ * خلاص الساب: بنفكّ حجز المتصفح اللي كان شايله.
+ * النافذة بتفضل موجودة (بتتقفل لما الحوض يقرر) — بس بقت حرة لساب تاني،
+ * والمحرك بيبدأ الساب الجديد من صفحة بحث نظيفة.
  */
 ipcMain.handle("nd:release-sab", async (_e, payload) => {
   const sab = String(payload?.sab || "").trim();
+  if (!sab) return { ok: false, error: "رقم الساب مطلوب" };
+  const win = releaseWindowLease(sab);
   let released = 0;
-  for (const win of workers.windows) {
-    if (!win || win.isDestroyed() || win.__rpSab !== sab) continue;
-    win.__rpSabDone = true;
-    win.__rpSab = null;
-    setResourceMode(win, "search");
-    labelWindow(win, "متصفح جاهز");
+  for (const candidate of workers.windows) {
+    if (!candidate || candidate.isDestroyed()) continue;
+    if (candidate.__rpSab !== sab) continue;
+    candidate.__rpSabDone = true;
+    candidate.__rpSab = null;
+    setResourceMode(candidate, "search");
+    labelWindow(candidate, "متصفح جاهز");
     released += 1;
   }
   if (released) capLog("session", `الساب ${sab}: ${released} متصفح خلّص ورجع للحوض`);
-  return { ok: true, data: { sab, released } };
+  return { ok: true, data: { sab, released, window: Boolean(win) } };
 });
 
 ipcMain.handle("nd:deletes", async () => {
@@ -3529,6 +3662,15 @@ ipcMain.handle("nd:logout-everything", async () => {
   deleteResults.clear();
   loginTrace = [];
   return { ok: true };
+});
+
+// قفل البرنامج = إلغاء أي إرجاع لسه في الطابور (مفيش حذف بعد ما المستخدم يقفل)
+app.on("before-quit", () => {
+  try {
+    cancelPendingDeletes("البرنامج بيتقفل");
+  } catch {
+    /* تجاهل */
+  }
 });
 
 ipcMain.handle("nd:close-all", async () => {
