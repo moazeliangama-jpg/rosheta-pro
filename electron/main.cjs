@@ -2757,9 +2757,21 @@ async function processForm(win, job) {
       deleteState = "skipped-user";
       notes.push("الإرجاع متوقف من الإعدادات");
     } else {
+      /**
+       * روابط الإرجاع: لازم تكون روابط صفحات حقيقية (http أو /path).
+       * أزرار Pre-Approval في `#Table` بتفتح `javascript:CreatePreApprovalEprescription(...)`
+       * — الرابط ده مش صفحة، فلو دخلناه في الطابور كان الإرجاع بيروح لصفحة
+       * مش موجودة ويتسجّل «مش موجود» والاستمارة تفضل مفتوحة في الصرف.
+       */
       const candidates = [];
-      if (href) candidates.push(href.startsWith("http") ? href : `${BASE}${href}`);
-      for (const url of popup.urls) candidates.push(url);
+      const pushUrl = (value) => {
+        const raw = String(value || "").trim();
+        if (!raw || /^javascript:/i.test(raw) || raw === "#") return;
+        const abs = /^https?:/i.test(raw) ? raw : raw.startsWith("/") ? `${BASE}${raw}` : "";
+        if (abs && !candidates.includes(abs)) candidates.push(abs);
+      };
+      if (href) pushUrl(href);
+      for (const url of popup.urls) pushUrl(url);
 
       if (candidates.length) {
         deleteQueue = enqueueDelete({ key: `${sab}::${reference}`, sab, reference, candidates });

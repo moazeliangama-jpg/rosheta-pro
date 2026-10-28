@@ -233,3 +233,8 @@ test("المتصفح بيتحرر من الساب حتى لو الساب مال�
   assert.ok(finallyAt > 0, "التحرير لازم يكون في finally");
   assert.ok(releaseAt > finallyAt, "releaseSab لازم يكون جوه finally");
 });
+
+test("روابط الإرجاع لازم تكون صفحات حقيقية (مش javascript:)", () => {
+  const body = main.slice(main.indexOf("async function processForm"));
+  assert.match(body, /\/\^javascript:\/i\.test\(raw\)/, "لازم نرفض روابط javascript: في طابور الإرجاع");
+});
