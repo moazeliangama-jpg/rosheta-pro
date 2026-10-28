@@ -16,6 +16,7 @@ import {
 import { useAppStore } from "../lib/store";
 import { progressSummary } from "../lib/eligibility";
 import { SpeedPanel } from "../components/SpeedPanel";
+import { groupFailures } from "../lib/failures";
 import { Badge, Button, Card, EmptyState, Progress, SectionTitle, Stat } from "../components/ui";
 import { arNum, elapsedLabel, nowTime } from "../lib/utils";
 
@@ -24,11 +25,13 @@ export function RunScreen({
   onResume,
   onStop,
   onDecision,
+  onRetryFailed,
 }: {
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
   onDecision: () => void;
+  onRetryFailed: () => void;
 }) {
   const session = useAppStore((s) => s.session);
   const cases = useAppStore((s) => s.cases);
@@ -42,6 +45,8 @@ export function RunScreen({
   }, []);
 
   const list = Object.values(cases);
+  // ١٢٢) أسباب الفشل مجمّعة — «١٢ مهلة و٣ غير موجود» أوضح من قائمة طويلة
+  const failureGroups = groupFailures(failed);
   const stats = progressSummary(list);
   const busy = session.state === "scanning" || session.state === "running" || session.state === "paused";
   const elapsed = session.startedAt ? (session.endedAt ?? now) - session.startedAt : 0;
@@ -157,6 +162,9 @@ export function RunScreen({
             <AlertTriangle className="h-4 w-4" />
             {stats.failed} استمارة متعثرة — اتخطّت والجلسة كملت، وتقدر تعيدها من شاشة القرار.
           </div>
+          <Button size="sm" onClick={onRetryFailed}>
+            <ImageDown className="h-3.5 w-3.5" /> أعد كل الفاشل
+          </Button>
           <Button
             size="sm"
             variant="ghost"
@@ -174,6 +182,24 @@ export function RunScreen({
           >
             <Download className="h-3.5 w-3.5" /> إكسل المتعثرين
           </Button>
+        </div>
+      ) : null}
+
+      {failureGroups.length ? (
+        <div className="flex flex-wrap items-center gap-1.5 rounded-xl border border-white/10 bg-[#0b1518]/70 px-3 py-2">
+          <span className="text-[11px] text-white/40">أسباب التعثر:</span>
+          {failureGroups.map((g) => (
+            <span
+              key={g.key}
+              title={g.examples.join(" · ")}
+              className={
+                "rounded-md px-1.5 py-0.5 text-[10px] " +
+                (g.key === "not-found" ? "bg-white/5 text-white/50" : "bg-rose-500/15 text-rose-200")
+              }
+            >
+              {g.count} {g.label}
+            </span>
+          ))}
         </div>
       ) : null}
 

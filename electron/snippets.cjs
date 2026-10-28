@@ -425,6 +425,36 @@ const WAIT_AJAX_IDLE_SCRIPT = (timeoutMs = 6000) => `(async () => {
   return idle || 'timeout';
 })()`;
 
+/**
+ * ١١٩/١٢٠) فحص السلكتورات على الموقع الحقيقي.
+ * بيرجّع كل سلكتور مهم: موجود ولا لأ — عشان لو نايس دير غيّر الصفحة نعرف فورًا.
+ */
+const PROBE_SELECTORS_SCRIPT = `(() => {
+  const list = [
+    ['#SearchCode', 'خانة الساب', false],
+    ['#SearchId', 'زرار البحث', false],
+    ['#payerId', 'قائمة الباير', false],
+    ['#Table', 'جدول Pre-Approvals', false],
+    ['#Table2', 'جدول Claims', false],
+    ['.NDClaimIDResult', 'تليفون المستفيد', true],
+    ['#btn-DeleteClaim', 'زرار الإرجاع (صفحة الاستمارة)', true],
+    ['.close-icon', 'إغلاق النافذة المنبثقة', true],
+  ];
+  const results = list.map(([selector, label, optional]) => ({
+    selector,
+    label,
+    optional,
+    found: Boolean(document.querySelector(selector)),
+  }));
+  return {
+    page: location.href,
+    title: document.title,
+    hasJQuery: Boolean(window.jQuery),
+    results,
+    missing: results.filter((r) => !r.found && !r.optional).map((r) => r.selector),
+  };
+})()`;
+
 /** هل الصفحة اتحولت لشاشة الدخول؟ (الجلسة انتهت في نايس دير) */
 const SESSION_CHECK_SCRIPT = `(() => {
   if (document.querySelector('#SearchCode')) return 'ok';
@@ -548,6 +578,7 @@ module.exports = {
   HAS_DELETE_SCRIPT,
   WAIT_AJAX_IDLE_SCRIPT,
   SESSION_CHECK_SCRIPT,
+  PROBE_SELECTORS_SCRIPT,
   DELETE_OUTCOME_SCRIPT,
   CLOSE_MODAL_SCRIPT,
   FIND_IMAGE_LINK_SCRIPT,

@@ -8,7 +8,9 @@ import { bottleneck, speedLine, type StepSample, type StepName } from "./metrics
 import { RetryBudget, backoffDelay, classifyError, errorHint, shouldAbortEarly } from "./retry";
 import { initialWorkers, tuneWorkers } from "./tune";
 import { prepareNote, preparePatients } from "./prepare";
+import { hourAdjustment } from "./hourly";
 import { setSaveDelay } from "./store";
+import { OFFLINE_MESSAGE, isOnline, waitForOnline } from "./net";
 
 export { buildTasks };
 export type { Task };
@@ -16,6 +18,9 @@ export type { Task };
 const MAX_ATTEMPTS = 3;
 /** فاصل إعادة المحاولة الأساسي — backoff أسّي مع عشوائية */
 const RETRY_BASE_MS = 250;
+
+/** ترتيب ثابت للاستمارات: الأقدم الأول (المدة بتخلص) */
+const byDate = (a: CaseRecord, b: CaseRecord) => (a.formDateISO || "").localeCompare(b.formDateISO || "");
 
 /** جلسة واحدة بس في الوقت نفسه (منع تشغيل جلستين متوازيين) */
 let activeEngine: SessionEngine | null = null;
@@ -119,6 +124,8 @@ export class SessionEngine {
   /** عدّاد إعادة استخدام نتائج البحث (بدل بحث جديد) — بيثبت إن goBack بيشتغل */
   private reusedSearches = 0;
   private freshSearches = 0;
+  /** ١١٤) سلسلة أخطاء شبكة/مهلة — لو طالت بنقلّل النوافذ في الجلسة اليدوية */
+  private networkHits = 0;
 
   constructor(onTick: Listener = () => {}) {
     this.onTick = onTick;
@@ -130,7 +137,10 @@ export class SessionEngine {
 
   private log(level: "info" | "ok" | "warn" | "error", msg: string) {
     // رسالة الخطأ بتتحول لنص فيه الحل في سطر (مش نص الخطأ الخام)
-    useAppStore.getState().logLine(level, level === "error" ? errorHint(msg) : msg);
+    const line = level === "error" ? errorHint(msg) : msg;
+    useAppStore.getState().logLine(level, line);
+    // ١٢١) نفس السطر بيتكتب في ملف على القرص يفضل بعد قفل البرنامج
+    void bridge()?.log({ level, msg: line });
   }
 
   /** تسجيل خطوة في القياس (بيتجمّع وبيتفرّغ في النبضة) */
@@ -139,6 +149,13 @@ export class SessionEngine {
     this.steps.push({ at: Date.now(), sab, step, ms: Math.round(ms), ok, note });
     this.avgRecent.push(Math.round(ms));
     if (this.avgRecent.length > 40) this.avgRecent.shift();
+    // ١١٢) سرعة السيرفر حسب الساعة — بيتبني على أسبوع
+    if (ok && (step === "search" || step === "capture") && ms > 0) {
+      useAppStore.getState().addHourSample(new Date().getHours(), ms);
+    }
+    // ١١٤) تتبّع أخطاء الشبكة المتتالية
+    if (ok) this.networkHits = 0;
+    else if (/مهلة|timeout|ERR_|شبك|اتصال|مش بتستجيب/i.test(note ?? "")) this.networkHits += 1;
   }
 
   private flushSteps() {
@@ -164,6 +181,11 @@ export class SessionEngine {
         "error",
         `أول ${this.consecutiveFailures} سابات فشلوا كلهم — وقفت تلقائيًا بدل ما أكرر نفس الخطأ. راجع بيانات الدخول والباير.`,
       );
+      // ١٢٦) إشعار بالتوقف بسبب خطأ — مش بس لما الجلسة تخلص بنجاح
+      void bridge()?.notify({
+        title: "الجلسة اتوقفت بسبب خطأ",
+        body: `أول ${this.consecutiveFailures} سابات فشلوا — راجع بيانات الدخول والباير في الإعداد.`,
+      });
     }
   }
 
@@ -321,7 +343,7 @@ export class SessionEngine {
     }
 
     // دورة تانية للفاشلين: مرة واحدة بس آخر الجلسة
-    if (!this.cancelled && doImages) await this.retryFailedImages();
+    if (!this.cancelled && doImages) await this.retryAllFailed();
 
     // الإرجاعات الفاشلة بتتعاد مرة واحدة، وبعدها بنستنى الطابور يخلص
     await b.retryDeletes();
@@ -384,6 +406,30 @@ export class SessionEngine {
       successes: Math.max(1, this.doneForms + this.doneSubs - this.failures),
       failures: this.failures,
     });
+
+    // ١١٣) لو الساعة الحالية أبطأ من المعتاد على السيرفر، نقلّل نافذة قبل أي زيادة
+    const hour = hourAdjustment(useAppStore.getState().hourly, new Date().getHours(), avg);
+    // ١١٤) النت ضعيف (٣ أخطاء شبكة متتالية) → نقلّل بدل ما نزوّد
+    const weakNetwork = this.networkHits >= 3;
+
+    if (weakNetwork && this.workers > 2) {
+      this.prevAvg = avg;
+      store.patchSession({ lastTuneAt: Date.now() });
+      this.workers -= 1;
+      await bridge()?.tune(this.workers);
+      store.patchSession({ workers: this.workers, autoTuned: store.session.autoTuned + 1 });
+      this.log("warn", `النت ضعيف (${this.networkHits} أخطاء متتالية) — تقليل النوافذ لـ ${this.workers}.`);
+      return;
+    }
+    if (hour.factor < 0 && this.workers > 2) {
+      this.prevAvg = avg;
+      store.patchSession({ lastTuneAt: Date.now() });
+      this.workers -= 1;
+      await bridge()?.tune(this.workers);
+      store.patchSession({ workers: this.workers, autoTuned: store.session.autoTuned + 1 });
+      this.log("info", `ضبط بالساعة: ${hour.reason} (${this.workers} نافذة).`);
+      return;
+    }
     this.prevAvg = avg;
     store.patchSession({ lastTuneAt: Date.now() });
     if (!decision.changed) return;
@@ -417,6 +463,26 @@ export class SessionEngine {
     this.log("ok", `انتهى الجرد — ${count} استمارة من ${patients.length} ساب.`);
   }
 
+  /**
+   * ٦٧) قبل أي شغل على الشبكة: لو النت واقف بنستنى رجوعه بدل ما نحرق المحاولات
+   * ونعلّم استمارات كأنها فشلت.
+   */
+  private async ensureOnline(what: string): Promise<void> {
+    if (isOnline()) return;
+    this.log("warn", `النت واقف قبل ${what} — البرنامج مستني رجوع الاتصال…`);
+    const self = this;
+    const signal = { get cancelled() { return self.cancelled; } };
+    const ok = await waitForOnline({
+      timeoutMs: 10 * 60 * 1000,
+      signal,
+      onWait: (ms) => {
+        if (ms > 0 && ms % 60000 === 0) this.log("info", `لسه مستني النت (${Math.round(ms / 60000)} دقيقة).`);
+      },
+    });
+    if (!ok || this.cancelled) throw new Error(OFFLINE_MESSAGE);
+    this.log("ok", "النت رجع — بنكمّل من نفس المكان.");
+  }
+
   private async scanOne(patient: PatientRow): Promise<CaseRecord[]> {
     const b = requireBridge();
     const s = this.settings();
@@ -424,6 +490,7 @@ export class SessionEngine {
     let lastError = "";
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      await this.ensureOnline(`بحث الساب ${patient.sab}`);
       const t0 = Date.now();
       try {
         const res = await b.searchSub({
@@ -448,19 +515,32 @@ export class SessionEngine {
 
         if (data.empty || !data.forms.length) {
           store.logLine("warn", `الساب ${patient.sab}: ${data.note || "مفيش استمارات"}`);
-          store.setSabCache(patient.sab, { day: dateKey(), forms: 0, missing: true });
+          store.setSabCache(patient.sab, { day: dateKey(), forms: 0, missing: true, at: Date.now() });
+          // ١١٨) لقطة HTML عند «مفيش نتائج مش متأكد منها» — عشان لو الموقع اتغير نعرف فورًا
+          if (s.debugMode && !data.note?.includes("لم يرجع")) {
+            const dump = await b.dumpHtml({ sab: patient.sab, reason: "search-empty" });
+            if (dump?.ok) this.log("warn", `اتحفظت لقطة HTML للتشخيص: ${dump.data?.file ?? ""}`);
+          }
           this.consecutiveFailures = 0;
           this.doneSubs += 1;
           this.checkpoint(patient.sab);
           return [];
         }
 
-        const cases = data.forms.map((f) => toCase(effective, f, s));
+        const today = dateKey();
+        const seen = useAppStore.getState().seenForms;
+        const cases = data.forms.map((f) => {
+          const c = toCase(effective, f, s);
+          // ١١٦) أول يوم ظهرت فيه الاستمارة — أساس جلسة «الجديد فقط»
+          c.firstSeen = seen[c.id] ?? today;
+          return c;
+        });
         // دفعة واحدة بدل تحديث لكل استمارة
         store.upsertCases(cases);
+        store.markSeen(cases.map((c) => c.id), today);
 
-        // كاش اليوم: الساب اتجرد — مش هيتكرر في نفس اليوم
-        store.setSabCache(patient.sab, { day: dateKey(), forms: cases.length });
+        // كاش اليوم: الساب اتجرد — مش هيتكرر في نفس اليوم (والوقت محفوظ للعرض)
+        store.setSabCache(patient.sab, { day: today, forms: cases.length, at: Date.now() });
 
         const monthlyForms = data.forms
           .filter((f) => isMonthlyForm(f))
@@ -522,7 +602,6 @@ export class SessionEngine {
    * بيوفر بحث كامل لكل استمارة لأن نتايج الساب بتفضل محفوظة في النافذة.
    */
   private async pipelinePhase(patients: PatientRow[]) {
-    const s = this.settings();
     this.log("info", `وضع مرعب ⚡: خطة مختلطة — كل ساب بيتجرد وبيتصور على نفس النافذة (${this.workers} نوافذ).`);
 
     await pool(patients, this.workers, async (patient) => {
@@ -533,15 +612,15 @@ export class SessionEngine {
       if (!cases.length || this.cancelled) return;
 
       const queue = cases
-        .filter((c) => c.valid || s.includeInvalid)
-        .filter((c) => useAppStore.getState().cases[c.id]?.rx.status !== "ready")
-        .sort((a, b) => (a.formDateISO || "").localeCompare(b.formDateISO || ""));
+        .map((c) => useAppStore.getState().cases[c.id] ?? c)
+        .filter((c) => this.needsImage(c))
+        .sort(byDate);
 
       const st = useAppStore.getState();
       st.patchSession({
         phase: queue.length ? "images" : "scan",
         // العدد الإجمالي المعروف لحد دلوقتي — شريط التقدم بيفضل واقعي
-        formsTotal: Object.values(st.cases).filter((c) => c.valid || s.includeInvalid).length,
+        formsTotal: Object.values(st.cases).filter((c) => this.needsImage(c)).length + this.doneForms,
       });
 
       for (const c of queue) {
@@ -562,10 +641,19 @@ export class SessionEngine {
   // -------------------------------------------------------------------------
 
   private imageQueue(): CaseRecord[] {
+    return Object.values(useAppStore.getState().cases).filter((c) => this.needsImage(c)).sort(byDate);
+  }
+
+  /**
+   * ١١٥) استمارة أخدت قرار فعلًا ما بتتعادش — حتى لو صورتها اتمسحت.
+   * ١١٦) ولو «الجديد فقط» مفعّل، بنجيب الصور للاستمارات اللي ظهرت النهاردة بس.
+   */
+  private needsImage(c: CaseRecord) {
     const s = this.settings();
-    return Object.values(useAppStore.getState().cases)
-      .filter((c) => (c.valid || s.includeInvalid) && c.rx.status !== "ready")
-      .sort((a, b) => (a.formDateISO || "").localeCompare(b.formDateISO || ""));
+    if (!(c.valid || s.includeInvalid)) return false;
+    if (c.hasDrugs !== null) return false;
+    if (s.onlyNewForms && c.firstSeen !== dateKey()) return false;
+    return c.rx.status !== "ready";
   }
 
   private async imagePhase() {
@@ -608,6 +696,7 @@ export class SessionEngine {
     store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      await this.ensureOnline(`صورة ${c.reference}`);
       const t0 = Date.now();
       try {
         const res = await b.fetchFormImage({
@@ -679,6 +768,16 @@ export class SessionEngine {
 
     store.setRxStatus(c.id, { status: "failed", attempts: MAX_ATTEMPTS, reason: lastError, updatedAt: Date.now() });
     this.fail(lastError || "فشل جلب الصورة بعد ٣ محاولات", "صورة", c.sab, c.patientName, c.workplace, c.reference);
+
+    // ٧٠) في وضع Debug: لقطة HTML وقت الفشل (اختيارية) — بتفرّق بين «الموقع اتغير» و«الصورة بطيئة»
+    if (s.debugMode) {
+      try {
+        const dump = await b.dumpHtml({ sab: c.sab, reason: `capture-${c.reference}` });
+        if (dump?.ok) this.log("warn", `اتحفظت لقطة HTML لفشل الصورة ${c.reference}: ${dump.data?.file ?? ""}`);
+      } catch {
+        /* اللقطة مش شرط */
+      }
+    }
   }
 
   /** لو طابور الإرجاع اتخنق، بنهدّي جلب الصور شوية بدل تكديس أكتر */
@@ -695,8 +794,8 @@ export class SessionEngine {
     }
   }
 
-  /** دورة تانية للصور اللي فشلت — مرة واحدة، آخر الجلسة */
-  private async retryFailedImages() {
+  /** دورة تانية للصور اللي فشلت — بتتنادى آخر الجلسة أو من زرار «أعد كل الفاشل» */
+  async retryAllFailed() {
     const s = this.settings();
     const store = useAppStore.getState();
     const failed = Object.values(store.cases).filter(
@@ -704,11 +803,13 @@ export class SessionEngine {
     );
     if (!failed.length) return;
     this.log("info", `محاولة أخيرة لـ ${failed.length} روشتة متعثرة.`);
+    void bridge()?.busy(true);
     for (const c of failed) {
       if (this.cancelled) return;
       store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
       await this.fetchImage(c);
     }
+    void bridge()?.busy(false);
   }
 
   // -------------------------------------------------------------------------

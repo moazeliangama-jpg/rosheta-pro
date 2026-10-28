@@ -14,6 +14,8 @@ export interface SabCacheEntry {
   day: string;
   forms: number;
   missing?: boolean;
+  /** وقت آخر جرد بالمللي — بيتعرض في الواجهة */
+  at?: number;
 }
 
 export interface PrepareOptions {

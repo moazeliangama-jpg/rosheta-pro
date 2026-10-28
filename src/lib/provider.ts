@@ -18,6 +18,14 @@ export interface SystemInfo {
   electron: string;
 }
 
+export interface MaintenanceInfo {
+  removed?: number;
+  logs: { count: number; bytes: number };
+  diagnostics: { count: number; bytes: number };
+  backups?: { count: number; bytes: number };
+  retention: { logs: number; diagnostics: number };
+}
+
 export interface RoshettaBridge {
   platform: string;
   version: string;
@@ -38,6 +46,20 @@ export interface RoshettaBridge {
   >;
   /** إعادة محاولة الإرجاعات الفاشلة مرة واحدة */
   retryDeletes: () => Promise<BridgeResult<{ retried: number }>>;
+  /** كتابة سطر في ملف اللوج على القرص (يفضل بعد قفل البرنامج) */
+  log: (p: { level: string; msg: string }) => Promise<BridgeResult>;
+  /** فحص السلكتورات على الموقع الحقيقي — بيقول أي سلكتور اختفى */
+  probe: () => Promise<BridgeResult<{ page: string; results: Array<{ selector: string; label: string; found: boolean }>; missing: string[] }>>;
+  /** حفظ لقطة HTML للتشخيص (وضع Debug) */
+  dumpHtml: (p: { sab?: string; reason?: string }) => Promise<BridgeResult<{ file: string }>>;
+  /** فحص جاهزية الجهاز — البرنامج بيجهّز نفسه بنفسه */
+  preflight: () => Promise<BridgeResult<{ checks: Array<{ key: string; label: string; ok: boolean; detail: string }>; ok: boolean; dirs?: Record<string, string> }>>;
+  /** ١٢٧) صيانة ملفات اللوج والتشخيص: إحصاء / تنضيف القديم / مسح الكل */
+  maintenance: (p: {
+    action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" | "open-backups";
+  }) => Promise<BridgeResult<MaintenanceInfo & { dir?: string }>>;
+  /** ٦٠) نسخة احتياطية يومية: الملف بيتحفظ في بيانات البرنامج */
+  backup: (p: { name: string; json: string }) => Promise<BridgeResult<{ file: string; bytes: number }>>;
   login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
   searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<
