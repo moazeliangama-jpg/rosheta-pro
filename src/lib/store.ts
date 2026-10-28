@@ -13,9 +13,10 @@ import type {
   SpeedSample,
   Verdict,
 } from "./types";
-import { loadImage, saveImage } from "./imageStore";
+import { saveImage } from "./imageStore";
 import { dateKey, uid } from "./utils";
 import { defaultSettings } from "./settings";
+import { putCachedImage } from "./imageCache";
 
 export { defaultSettings };
 
@@ -36,6 +37,12 @@ export const emptySession: SessionMeta = {
   failures: 0,
   workers: 5,
   autoWorkers: true,
+  turbo: true,
+  avgSearchMs: 0,
+  avgCaptureMs: 0,
+  formsPerMin: 0,
+  etaMin: null,
+  deletePending: 0,
   decisions: [],
   lastTuneAt: 0,
 };
@@ -108,6 +115,61 @@ interface AppState {
   hydrateImages: () => Promise<void>;
 }
 
+/**
+ * كتابة localStorage مؤجلة: مع مئات الاستمارات، الكتابة مع كل تحديث كانت
+ * بتعمل JSON.stringify لكل الحالة عشرات المرات في الثانية — ده كان بيبطّأ الواجهة.
+ */
+function debouncedStorage() {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let last: [string, string] | null = null;
+
+  const flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (!last) return;
+    try {
+      localStorage.setItem(last[0], last[1]);
+    } catch (err) {
+      console.warn("تعذر حفظ الحالة محليًا", err);
+    }
+    last = null;
+  };
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("beforeunload", flush);
+    window.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") flush();
+    });
+  }
+
+  return {
+    getItem: (key: string) => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    },
+    setItem: (key: string, value: string) => {
+      last = [key, value];
+      if (timer) return;
+      timer = setTimeout(() => {
+        timer = null;
+        flush();
+      }, 600);
+    },
+    removeItem: (key: string) => {
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* تجاهل */
+      }
+    },
+  };
+}
+
 export const useAppStore = create<AppState>()(
   persist(
     (set, get) => ({
@@ -165,7 +227,13 @@ export const useAppStore = create<AppState>()(
           return { cases: { ...s.cases, [id]: { ...prev, rx: mergeRx(prev.rx, rx), updatedAt: Date.now() } } };
         }),
 
+      /**
+       * بتسجل إن الصورة جاهزة. الصورة نفسها بتتحفظ في IndexedDB وبتتقرأ عند العرض
+       * — مش بنحتفظ بنسخة منها في حالة React عشان الذاكرة والحفظ يفضلوا سريعين.
+       */
       setImage: (id, dataUrl, method) => {
+        putCachedImage(id, dataUrl);
+        void saveImage(id, dataUrl);
         set((s) => {
           const prev = s.cases[id];
           if (!prev) return s;
@@ -174,12 +242,11 @@ export const useAppStore = create<AppState>()(
               ...s.cases,
               [id]: {
                 ...prev,
-                rx: { status: "ready", dataUrl, method, attempts: prev.rx.attempts, updatedAt: Date.now() },
+                rx: { status: "ready", method, attempts: prev.rx.attempts, updatedAt: Date.now() },
               },
             },
           };
         });
-        void saveImage(id, dataUrl);
       },
 
       setHasDrugs: (id, value) =>
@@ -251,42 +318,17 @@ export const useAppStore = create<AppState>()(
         }),
 
       /**
-       * استرجاع الصور من IndexedDB بعد فتح البرنامج.
-       * أي استمارة كانت «جاهزة» وصورتها مش موجودة في التخزين بتتحول لـ failed
-       * بسبب واضح، مش مربع فاضي.
+       * الصور بتتقرأ من IndexedDB وقت العرض (lazy) — مش بنحمّل كل الصور في الذاكرة
+       * عند فتح البرنامج. الدالة للتوافق وبس بتعلّم الجاهزية.
        */
       hydrateImages: async () => {
         if (get().imagesHydrated) return;
-        const cases = get().cases;
-        const ids = Object.keys(cases).filter((id) => cases[id].rx.status === "ready" && !cases[id].rx.dataUrl);
-        if (!ids.length) {
-          set({ imagesHydrated: true });
-          return;
-        }
-        const next = { ...get().cases };
-        let missing = 0;
-        for (const id of ids) {
-          const dataUrl = await loadImage(id);
-          const c = next[id];
-          if (!c) continue;
-          if (dataUrl) next[id] = { ...c, rx: { ...c.rx, dataUrl, status: "ready" } };
-          else {
-            missing += 1;
-            next[id] = {
-              ...c,
-              rx: { ...c.rx, status: "failed", reason: "الصورة مش موجودة في التخزين المحلي — اضغط إعادة الجلب" },
-            };
-          }
-        }
-        set({ cases: next, imagesHydrated: true });
-        if (missing) {
-          get().logLine("warn", `${missing} صورة روشتة مش موجودة في التخزين المحلي. أعد جلبها من شاشة القرار.`);
-        }
+        set({ imagesHydrated: true });
       },
     }),
     {
       name: "rosheta-pro-v2",
-      storage: createJSONStorage(() => localStorage),
+      storage: createJSONStorage(debouncedStorage),
       partialize: (s) => ({
         ...s,
         imagesHydrated: false,

@@ -3,10 +3,17 @@ import { evaluateMonthly, evaluateValidity, isMonthlyForm } from "./eligibility"
 import { bridge, bridgeError, requireBridge } from "./provider";
 import type { CaseRecord, FailedRecord, MonthlyCheck, NdForm, NdSearchResult, PatientRow } from "./types";
 import { clamp, sleep, uid } from "./utils";
+import { buildTasks, type Task } from "./tasks";
+
+export { buildTasks };
+export type { Task };
 
 const MAX_ATTEMPTS = 3;
+/** فاصل إعادة المحاولة — صغير عشان السرعة، البرنامج بيعيد بسرعة بدل ما يستنى */
+const RETRY_BASE_MS = 120;
 
 export const caseKey = (sab: string, source: string, reference: string) => `${sab}::${source}::${reference}`;
+export const deleteKey = (sab: string, reference: string) => `${sab}::${reference}`;
 
 export function toCase(
   patient: PatientRow,
@@ -49,24 +56,28 @@ export function toCase(
   };
 }
 
+/** بركة تنفيذ بسيطة بعدد محدد */
 async function pool<T>(items: T[], concurrency: number, worker: (item: T, index: number) => Promise<void>) {
+  if (!items.length) return;
   let cursor = 0;
-  const runners = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
-    while (cursor < items.length) {
-      const index = cursor++;
-      await worker(items[index], index);
-    }
-  });
-  await Promise.all(runners);
+  const size = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(
+    Array.from({ length: size }, async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        await worker(items[index], index);
+      }
+    }),
+  );
 }
 
 type Listener = () => void;
 
 /**
- * محرك التشغيل الحقيقي:
- *  المرحلة 1 «جرد»: بحث كل ساب في نايس دير وقراءة الجدولين + التليفون،
- *                  وتطبيق قاعدة الصلاحية (6 أيام / Pre-Approval في الشهر).
- *  المرحلة 2 «صور»: الضغط على كل رقم مرجعي، التقاط صورة الروشتة، الإرجاع (Delete).
+ * محرك التشغيل السريع:
+ *  1) تسخين كل النوافذ بالتوازي (تحميل صفحة البحث مرة واحدة).
+ *  2) جرد: بحث كل ساب في نداء واحد (باير → إغلاق → ساب → Search → ثبات النتائج).
+ *  3) صور: نافذة الصورة بتتفتح وتتلقط فورًا، والإرجاع (Delete) بيتم في الخلفية.
  */
 export class SessionEngine {
   private cancelled = false;
@@ -77,10 +88,15 @@ export class SessionEngine {
   private doneSubs = 0;
   private doneForms = 0;
   private images = 0;
-  private recentFailures: number[] = [];
-  private timer?: ReturnType<typeof setInterval>;
-  private finished = false;
   private readonly onTick: Listener;
+
+  private searchMsTotal = 0;
+  private searchCount = 0;
+  private captureMsTotal = 0;
+  private captureCount = 0;
+  private keyToId = new Map<string, string>();
+  private pollInFlight = false;
+  private lastPoll = 0;
 
   constructor(onTick: Listener = () => {}) {
     this.onTick = onTick;
@@ -96,31 +112,39 @@ export class SessionEngine {
 
   private requestedWorkers() {
     const s = this.settings();
-    if (s.workerChoice === "auto") return 5;
-    return clamp(Number(s.workerChoice), 1, 10);
+    if (s.workerChoice === "auto") return 8;
+    return clamp(Number(s.workerChoice), 1, 16);
   }
 
-  /** يضبط بركة نوافذ نايس دير قبل البدء */
   async syncBridge() {
     const b = bridge();
     if (!b) return;
     const s = this.settings();
-    await b.setCredentials({ username: s.niceDeerUser, password: s.niceDeerPass, maxWorkers: this.requestedWorkers() });
+    await b.setCredentials({
+      username: s.niceDeerUser,
+      password: s.niceDeerPass,
+      maxWorkers: this.requestedWorkers(),
+    });
   }
 
   async start(patients: PatientRow[], opts: { fresh: boolean; scan?: boolean; images?: boolean }) {
-    const doScan = opts.scan !== false;
-    const doImages = opts.images !== false;
     const store = useAppStore.getState();
     const b = requireBridge();
+    const doScan = opts.scan !== false;
+    const doImages = opts.images !== false;
+    const s0 = this.settings();
+
     this.cancelled = false;
     this.paused = false;
-    this.finished = false;
     this.failures = 0;
     this.doneSubs = 0;
     this.doneForms = 0;
     this.images = 0;
-    this.recentFailures = [];
+    this.searchMsTotal = 0;
+    this.searchCount = 0;
+    this.captureMsTotal = 0;
+    this.captureCount = 0;
+    this.keyToId.clear();
     this.startedAt = Date.now();
     this.workers = this.requestedWorkers();
 
@@ -140,108 +164,116 @@ export class SessionEngine {
       endedAt: null,
       subsTotal: patients.length,
       subsDone: 0,
-      formsTotal: 0,
+      formsTotal: Object.values(store.cases).length,
       formsDone: 0,
       images: 0,
       failures: 0,
       workers: this.workers,
-      autoWorkers: this.settings().workerChoice === "auto",
+      autoWorkers: s0.workerChoice === "auto",
+      turbo: s0.turboMode,
+      avgSearchMs: 0,
+      avgCaptureMs: 0,
+      formsPerMin: 0,
+      etaMin: null,
+      deletePending: 0,
       decisions: [],
       lastTuneAt: Date.now(),
     });
 
-    this.log("info", `بدء الجرد الحقيقي على نايس دير — ${patients.length} ساب، ${this.workers} نوافذ متوازية، الباير: ${this.settings().payerName || "غير محدد"}`);
+    this.timer = setInterval(() => this.tick(), 1200);
 
-    this.timer = setInterval(() => {
-      useAppStore.getState().pushSample({
-        at: Date.now(),
-        done: this.doneForms,
-        failed: this.failures,
-        forms: this.images,
-        workers: this.workers,
-      });
-      this.onTick();
-    }, 1500);
-
-    // ---------- المرحلة 1: الجرد ----------
-    if (!doScan) {
-      this.log("info", "تخطي الجرد — التشغيل على البيانات المحفوظة.");
-    } else {
-    await pool(patients, this.workers, async (patient) => {
-      if (this.cancelled) return;
-      while (this.paused && !this.cancelled) await sleep(300);
-      if (this.cancelled) return;
-      await this.scanOne(patient);
-    });
-
-    const cases = Object.values(useAppStore.getState().cases);
-    this.log("ok", `انتهى الجرد — ${cases.length} استمارة من ${patients.length} ساب.`);
-    }
-
-    if (this.cancelled || !doImages) {
-      this.finish();
-      return;
-    }
-
-    // ---------- المرحلة 2: صور الروشتات ----------
-    const queue = this.imageQueue();
-    useAppStore.getState().patchSession({
-      state: "running",
-      phase: "images",
-      formsTotal: queue.length,
-      formsDone: 0,
-    });
-
-    if (!queue.length) {
-      this.log("warn", "مفيش استمارات داخل مدة الصلاحية محتاجة صور.");
-      this.finish();
-      return;
-    }
-
-    this.log("info", `بدء جلب صور ${queue.length} روشتة…`);
-
-    // كل ساب بيتعالج في نافذة واحدة؛ الاستمارات بتتاخد بالترتيب
-    const bySab = new Map<string, CaseRecord[]>();
-    for (const c of queue) {
-      if (!bySab.has(c.sab)) bySab.set(c.sab, []);
-      bySab.get(c.sab)!.push(c);
-    }
-    const groups = [...bySab.values()];
-
-    await pool(groups, this.workers, async (group) => {
-      for (const c of group) {
-        if (this.cancelled) return;
-        while (this.paused && !this.cancelled) await sleep(300);
-        if (this.cancelled) return;
-        await this.fetchImage(c);
-        this.doneForms += 1;
-        this.onTick();
-        void b.setWorkers(this.workers);
+    // تسخين النوافذ بالتوازي — بيفتح صفحة البحث مرة واحدة لكل نافذة
+    if (s0.turboMode) {
+      const warm = await b.warmup(this.workers);
+      if (warm.ok) {
+        this.log("ok", `تسخين ${warm.data?.workers ?? this.workers} نوافذ في ${warm.data?.ms ?? 0} مللي ثانية.`);
+      } else {
+        this.log("warn", `تسخين النوافذ لم يكتمل: ${warm.error ?? "سبب غير معروف"}`);
       }
-    });
+    }
+
+    this.log(
+      "info",
+      `بدء التشغيل — ${patients.length} ساب، ${this.workers} نوافذ، ${s0.turboMode ? "وضع مرعب ⚡" : "وضع عادي"}، الباير: ${s0.payerName || "غير محدد"}`,
+    );
+
+    // الوضع المرعب: بنشتغل كل ساب لآخره (جرد + صور) على نفس النافذة —
+    // بحث واحد لكل ساب بدل ما الجرد كله يخلص وبعدها نعيد البحث لكل استمارة.
+    if (doScan && doImages && s0.turboMode) {
+      await this.pipelinePhase(patients);
+    } else {
+      if (doScan) await this.scanPhase(patients);
+      if (!this.cancelled && doImages) await this.imagePhase();
+    }
+
+    await this.resolveDeletes();
 
     this.finish();
   }
 
-  /** بحث ساب واحد وبناء حالاته */
-  private async scanOne(patient: PatientRow) {
+  private timer?: ReturnType<typeof setInterval>;
+
+  private tick() {
+    const store = useAppStore.getState();
+    const elapsedMin = Math.max((Date.now() - this.startedAt) / 60000, 0.02);
+    const rate = this.doneForms / elapsedMin;
+    store.pushSample({
+      at: Date.now(),
+      done: this.doneForms,
+      failed: this.failures,
+      forms: this.images,
+      workers: this.workers,
+    });
+    store.patchSession({
+      subsDone: this.doneSubs,
+      formsDone: this.doneForms,
+      images: this.images,
+      failures: this.failures,
+      avgSearchMs: this.searchCount ? Math.round(this.searchMsTotal / this.searchCount) : 0,
+      avgCaptureMs: this.captureCount ? Math.round(this.captureMsTotal / this.captureCount) : 0,
+      formsPerMin: Math.round(rate * 10) / 10,
+      etaMin: rate > 0 ? Math.max(0, Math.round(((store.session.formsTotal - this.doneForms) / rate) * 10) / 10) : null,
+    });
+    void this.pollDeletes();
+    this.onTick();
+  }
+
+  // -------------------------------------------------------------------------
+  // المرحلة ١: الجرد
+  // -------------------------------------------------------------------------
+
+  private async scanPhase(patients: PatientRow[]) {
+    await pool(patients, this.workers, async (patient) => {
+      while (this.paused && !this.cancelled) await sleep(150);
+      if (this.cancelled) return;
+      await this.scanOne(patient);
+    });
+    const count = Object.values(useAppStore.getState().cases).length;
+    this.log("ok", `انتهى الجرد — ${count} استمارة من ${patients.length} ساب.`);
+  }
+
+  private async scanOne(patient: PatientRow): Promise<CaseRecord[]> {
     const b = requireBridge();
     const s = this.settings();
     const store = useAppStore.getState();
     let lastError = "";
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      const t0 = Date.now();
       try {
         const res = await b.searchSub({ sab: patient.sab, payerId: s.payerId, payerName: s.payerName });
         if (!res.ok) throw new Error(bridgeError(res, "فشل البحث في نايس دير"));
         const data = res.data as NdSearchResult;
+        this.searchMsTotal += res.ms ?? Date.now() - t0;
+        this.searchCount += 1;
+
         const phone = (data.phone || patient.phone || "").trim();
         const effective: PatientRow = { ...patient, phone };
 
         if (data.empty || !data.forms.length) {
           store.logLine("warn", `الساب ${patient.sab}: ${data.note || "مفيش استمارات"}`);
           this.doneSubs += 1;
-          return;
+          return [];
         }
 
         const cases = data.forms.map((f) => toCase(effective, f, s));
@@ -250,50 +282,106 @@ export class SessionEngine {
         const monthlyForms = data.forms
           .filter((f) => isMonthlyForm(f))
           .map((f) => ({ dateISO: f.dateISO, date: f.date, reference: f.reference }));
-        const check = evaluateMonthly({
-          sab: patient.sab,
-          patientName: patient.name,
-          phone,
-          workplace: patient.workplace,
-          monthlyForms,
-          validityDays: s.validityDays,
-        });
-        store.upsertMonthly([check]);
+        store.upsertMonthly([
+          evaluateMonthly({
+            sab: patient.sab,
+            patientName: patient.name,
+            phone,
+            workplace: patient.workplace,
+            monthlyForms,
+            validityDays: s.validityDays,
+          }),
+        ]);
 
         const validCount = cases.filter((c) => c.valid).length;
         store.logLine(
           "ok",
-          `الساب ${patient.sab} (${patient.name}): ${data.forms.length} استمارة — ${validCount} داخل المدة، الشهري ${check.computed === "available" ? "متاح" : "غير متاح"}.`,
+          `الساب ${patient.sab} (${patient.name}): ${cases.length} استمارة — ${validCount} داخل المدة في ${Date.now() - t0} مللي.`,
         );
         this.doneSubs += 1;
-        return;
+        return cases;
       } catch (err) {
         lastError = err instanceof Error ? err.message : "خطأ غير معروف";
-        await sleep(600 * attempt);
+        if (/غير موجود|مش موجود/.test(lastError)) break;
+        await sleep(RETRY_BASE_MS * attempt);
       }
     }
 
-    this.failures += 1;
-    this.recentFailures.push(Date.now());
-    store.addFailed({
-      id: uid("fail"),
-      sab: patient.sab,
-      patientName: patient.name,
-      workplace: patient.workplace,
-      step: "بحث",
-      reference: "",
-      reason: lastError || "فشل بعد ٣ محاولات",
-      at: Date.now(),
-    });
-    store.logLine("error", `فشل جرد الساب ${patient.sab}: ${lastError}`);
+    this.fail(lastError || "فشل بعد ٣ محاولات", "بحث", patient.sab, patient.name, patient.workplace, "");
+    return [];
   }
+
+  /**
+   * خط إنتاج: لكل ساب — بحث واحد، وبعدها صور استماراته على نفس النافذة.
+   * بيوفر بحث كامل لكل استمارة لأن نتايج الساب بتفضل محفوظة في النافذة.
+   */
+  private async pipelinePhase(patients: PatientRow[]) {
+    const s = this.settings();
+    this.log("info", `وضع مرعب ⚡: خطة مختلطة — كل ساب بيتجرد وبيتصور على نفس النافذة (${this.workers} نوافذ).`);
+
+    await pool(patients, this.workers, async (patient) => {
+      while (this.paused && !this.cancelled) await sleep(150);
+      if (this.cancelled) return;
+
+      const cases = await this.scanOne(patient);
+      if (!cases.length || this.cancelled) return;
+
+      const queue = cases
+        .filter((c) => c.valid || s.includeInvalid)
+        .filter((c) => useAppStore.getState().cases[c.id]?.rx.status !== "ready")
+        .sort((a, b) => (a.formDateISO || "").localeCompare(b.formDateISO || ""));
+
+      if (queue.length) useAppStore.getState().patchSession({ phase: "images" });
+
+      for (const c of queue) {
+        while (this.paused && !this.cancelled) await sleep(150);
+        if (this.cancelled) return;
+        await this.fetchImage(c);
+        this.doneForms += 1;
+        this.onTick();
+      }
+    });
+
+    const total = Object.values(useAppStore.getState().cases).length;
+    this.log("ok", `خلصت خطة الوضع المرعب — ${total} استمارة من ${patients.length} ساب.`);
+  }
+
+  // -------------------------------------------------------------------------
+  // المرحلة ٢: الصور
+  // -------------------------------------------------------------------------
 
   private imageQueue(): CaseRecord[] {
     const s = this.settings();
-    const cases = Object.values(useAppStore.getState().cases);
-    return cases
+    return Object.values(useAppStore.getState().cases)
       .filter((c) => (c.valid || s.includeInvalid) && c.rx.status !== "ready")
       .sort((a, b) => (a.formDateISO || "").localeCompare(b.formDateISO || ""));
+  }
+
+  private async imagePhase() {
+    const queue = this.imageQueue();
+    const store = useAppStore.getState();
+    store.patchSession({ state: "running", phase: "images", formsTotal: queue.length, formsDone: 0 });
+
+    if (!queue.length) {
+      this.log("warn", "مفيش استمارات داخل المدة محتاجة صور.");
+      return;
+    }
+
+    const tasks = buildTasks(queue, this.workers);
+    this.log(
+      "info",
+      `بدء التقاط ${queue.length} روشتة موزعة على ${tasks.length} مهمة / ${this.workers} نافذة (أطول مهمة: ${tasks[0]?.items.length ?? 0} استمارة).`,
+    );
+
+    await pool(tasks, this.workers, async (task) => {
+      for (const c of task.items) {
+        while (this.paused && !this.cancelled) await sleep(150);
+        if (this.cancelled) return;
+        await this.fetchImage(c);
+        this.doneForms += 1;
+        this.onTick();
+      }
+    });
   }
 
   private async fetchImage(c: CaseRecord) {
@@ -303,7 +391,6 @@ export class SessionEngine {
     let lastError = "";
 
     store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
-    this.onTick();
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
       try {
@@ -323,56 +410,126 @@ export class SessionEngine {
           deleted: Boolean(res.data.deleted),
           deleteState: res.data.deleteState || "unknown",
         });
+
+        const timings = res.data.timings || {};
+        if (typeof timings.searchMs === "number") {
+          this.searchMsTotal += timings.searchMs;
+          this.searchCount += 1;
+        }
+        if (typeof timings.captureMs === "number") {
+          this.captureMsTotal += timings.captureMs;
+          this.captureCount += 1;
+        }
+
+        this.keyToId.set(deleteKey(c.sab, c.reference), c.id);
         this.images += 1;
-        this.onTick();
         return;
       } catch (err) {
         lastError = err instanceof Error ? err.message : "خطأ غير معروف";
+        // أخطاء مش هتتحسن بإعادة المحاولة
+        if (/غير موجود|مش موجود|الساب والرقم المرجعي/.test(lastError)) break;
+        await sleep(RETRY_BASE_MS * attempt);
         store.setRxStatus(c.id, {
           status: "loading",
           attempts: attempt,
-          reason: `محاولة ${attempt} فشلت: ${lastError}`,
+          reason: lastError,
           updatedAt: Date.now(),
         });
-        await sleep(500 * attempt);
       }
     }
 
-    this.failures += 1;
-    this.recentFailures.push(Date.now());
     store.setRxStatus(c.id, { status: "failed", attempts: MAX_ATTEMPTS, reason: lastError, updatedAt: Date.now() });
-    store.addFailed({
-      id: uid("fail"),
-      sab: c.sab,
-      patientName: c.patientName,
-      workplace: c.workplace,
-      step: "صورة",
-      reference: c.reference,
-      reason: lastError || "فشل جلب الصورة بعد ٣ محاولات",
-      at: Date.now(),
-    });
-    store.logLine("error", `صورة ${c.reference} (ساب ${c.sab}) فشلت: ${lastError}`);
+    this.fail(lastError || "فشل جلب الصورة بعد ٣ محاولات", "صورة", c.sab, c.patientName, c.workplace, c.reference);
   }
 
-  /**
-   * إعادة جلب صورة استمارة واحدة.
-   * بتتنفذ على نسخة محرك مستقلة عشان ما توقفش جلسة شغّالة.
-   */
-  async retryImage(c: CaseRecord) {
-    this.cancelled = false;
-    this.finished = true;
-    useAppStore.getState().logLine("info", `إعادة جلب صورة ${c.reference} — ساب ${c.sab}`);
+  // -------------------------------------------------------------------------
+  // الإرجاع (Delete) في الخلفية
+  // -------------------------------------------------------------------------
+
+  private async pollDeletes(force = false) {
+    const b = bridge();
+    if (!b || this.pollInFlight) return;
+    if (!force && Date.now() - this.lastPoll < 2500) return;
+    this.pollInFlight = true;
+    this.lastPoll = Date.now();
     try {
-      await this.fetchImage(c);
+      const res = await b.deletes();
+      if (!res.ok || !res.data) return;
+      this.applyDeleteResults(res.data.results || {});
+      useAppStore.getState().patchSession({ deletePending: (res.data.pending || 0) + (res.data.running || 0) });
+    } catch {
+      /* تجاهل */
     } finally {
-      if (this.timer) clearInterval(this.timer);
+      this.pollInFlight = false;
     }
   }
 
-  /** إعادة الجرد لساب واحد (من القرار) */
+  private applyDeleteResults(results: Record<string, { state: string }>) {
+    const store = useAppStore.getState();
+    let patched = 0;
+    for (const [key, value] of Object.entries(results)) {
+      const id = this.keyToId.get(key);
+      if (!id) continue;
+      const current = store.cases[id];
+      if (!current) continue;
+      const state = value.state;
+      if (state === "queued" || state === "running") continue;
+      if (current.deleteState === state) continue;
+      store.patchCase(id, { deleted: state === "done", deleteState: state });
+      patched += 1;
+    }
+    if (patched) this.log("info", `تحديث حالة الإرجاع لـ ${patched} استمارة.`);
+  }
+
+  private async resolveDeletes(timeoutMs = 90000) {
+    const b = bridge();
+    if (!b || !this.keyToId.size) return;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      await this.pollDeletes(true);
+      const res = await b.deletes();
+      const data = res.data;
+      if (!data) break;
+      if ((data.pending || 0) === 0 && (data.running || 0) === 0) {
+        this.applyDeleteResults(data.results || {});
+        break;
+      }
+      await sleep(350);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // تحكم
+  // -------------------------------------------------------------------------
+
+  private fail(reason: string, step: FailedRecord["step"], sab: string, name: string, workplace: string, reference: string) {
+    if (this.cancelled) return;
+    this.failures += 1;
+    useAppStore.getState().addFailed({
+      id: uid("fail"),
+      sab,
+      patientName: name,
+      workplace,
+      step,
+      reference,
+      reason,
+      at: Date.now(),
+    });
+    this.log("error", `${step} فشل — ساب ${sab}${reference ? ` مرجع ${reference}` : ""}: ${reason}`);
+  }
+
+  /** إعادة جلب صورة استمارة واحدة (محرك مستقل عن الجلسة الشغالة) */
+  async retryImage(c: CaseRecord) {
+    this.cancelled = false;
+    await this.syncBridge();
+    useAppStore.getState().logLine("info", `إعادة جلب صورة ${c.reference} — ساب ${c.sab}`);
+    await this.fetchImage(c);
+    await this.pollDeletes(true);
+  }
+
+  /** إعادة الجرد لساب واحد */
   async rescanSab(patient: PatientRow) {
     this.cancelled = false;
-    this.finished = true;
     await this.syncBridge();
     await this.scanOne(patient);
   }
@@ -392,6 +549,7 @@ export class SessionEngine {
   async stop() {
     this.cancelled = true;
     this.paused = false;
+    if (this.timer) clearInterval(this.timer);
     const store = useAppStore.getState();
     for (const c of Object.values(store.cases)) {
       if (c.rx.status === "loading" || c.rx.status === "pending") {
@@ -408,11 +566,10 @@ export class SessionEngine {
   }
 
   private finish() {
-    if (this.finished) return;
-    this.finished = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     const store = useAppStore.getState();
+    const elapsedMin = Math.max((Date.now() - this.startedAt) / 60000, 0.02);
     store.patchSession({
       state: "done",
       endedAt: Date.now(),
@@ -420,17 +577,21 @@ export class SessionEngine {
       formsDone: this.doneForms,
       images: this.images,
       failures: this.failures,
+      formsPerMin: Math.round((this.doneForms / elapsedMin) * 10) / 10,
+      avgSearchMs: this.searchCount ? Math.round(this.searchMsTotal / this.searchCount) : 0,
+      avgCaptureMs: this.captureCount ? Math.round(this.captureMsTotal / this.captureCount) : 0,
+      etaMin: 0,
     });
     this.log(
       "ok",
-      `انتهى التشغيل — صور جاهزة: ${this.images}، متعثرات: ${this.failures}، سابات: ${this.doneSubs}/${store.session.subsTotal}.`,
+      `انتهى التشغيل — ${this.images} صورة، ${this.failures} متعثر، متوسط البحث ${store.session.avgSearchMs} مللي، متوسط الالتقاط ${store.session.avgCaptureMs} مللي.`,
     );
     store.setScreen("decision");
     this.onTick();
   }
 }
 
-/** إعادة حساب الصلاحية على تاريخ النهارده (الاستمارات بتقدم) */
+/** إعادة حساب الصلاحية على تاريخ النهارده */
 export function refreshValidity() {
   const store = useAppStore.getState();
   const s = store.settings;
@@ -449,25 +610,6 @@ export function refreshValidity() {
   }
   if (changed) store.logLine("info", `تم تحديث صلاحية ${changed} استمارة حسب تاريخ اليوم.`);
   return changed;
-}
-
-/** أي استمارة حالتها ready بدون صورة = حالة غير متسقة، بنعلّمها لإعادة الجلب */
-export function repairMissingImages() {
-  const store = useAppStore.getState();
-  let fixed = 0;
-  for (const c of Object.values(store.cases)) {
-    if (c.rx.status === "ready" && !c.rx.dataUrl) {
-      store.setRxStatus(c.id, {
-        status: "failed",
-        attempts: c.rx.attempts,
-        reason: "الصورة مش محمّلة في الذاكرة — اضغط إعادة الجلب",
-        updatedAt: Date.now(),
-      });
-      fixed += 1;
-    }
-  }
-  if (fixed) store.logLine("warn", `${fixed} روشتة محتاجة إعادة جلب صورة.`);
-  return fixed;
 }
 
 export function orderedCases(ids: string[], cases: Record<string, CaseRecord>) {
@@ -489,7 +631,6 @@ export function orderedCases(ids: string[], cases: Record<string, CaseRecord>) {
   });
 }
 
-/** ملخص الشهري لكل ساب بالترتيب */
 export function monthlyList(monthly: Record<string, MonthlyCheck>) {
   return Object.values(monthly).sort((a, b) => a.patientName.localeCompare(b.patientName, "ar"));
 }

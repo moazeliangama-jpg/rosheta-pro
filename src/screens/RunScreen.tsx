@@ -33,7 +33,6 @@ export function RunScreen({
   const session = useAppStore((s) => s.session);
   const cases = useAppStore((s) => s.cases);
   const log = useAppStore((s) => s.log);
-  const samples = useAppStore((s) => s.samples);
   const failed = useAppStore((s) => s.failed);
 
   const [now, setNow] = useState(Date.now());
@@ -51,11 +50,9 @@ export function RunScreen({
   const done = session.phase === "images" ? session.formsDone : session.subsDone;
   const pct = total ? Math.round((done / total) * 100) : 0;
 
-  const last = samples[samples.length - 1];
-  const first = samples[0];
-  const span = last && first ? Math.max((last.at - first.at) / 60000, 0.1) : 0;
-  const rate = last && first ? (last.forms - first.forms) / span : 0;
-  const remainingMin = rate > 0 ? Math.max(0, (session.formsTotal - session.formsDone) / rate) : null;
+  // معدل حقيقي من عدادات الجلسة (مش من العينات) — أدق وأسرع
+  const rate = session.formsPerMin || 0;
+  const remainingMin = session.etaMin;
 
   return (
     <div className="space-y-4">
@@ -135,19 +132,22 @@ export function RunScreen({
             }
           />
           <Stat label="المتبقي المتوقع" value={remainingMin !== null ? `${arNum(Math.ceil(remainingMin))} د` : "—"} />
-          <Stat label="صور/دقيقة" value={arNum(rate)} tone="ok" />
+          <Stat label="استمارة/دقيقة" value={arNum(rate)} tone="ok" />
+          <Stat label="متوسط الالتقاط" value={session.avgCaptureMs ? `${session.avgCaptureMs} ms` : "—"} />
+          <Stat label="متوسط البحث" value={session.avgSearchMs ? `${session.avgSearchMs} ms` : "—"} />
           <Stat label="صور جاهزة" value={stats.ready} tone="ok" />
-          <Stat label="داخل المدة" value={stats.valid} />
-          <Stat label="متعثرة" value={session.failures || stats.failed} tone="bad" />
         </div>
 
         <div className="mt-3 flex flex-wrap gap-1.5">
           <Badge tone="info">
             <Gauge className="h-3 w-3" /> {session.workers} نوافذ متوازية
           </Badge>
+          {session.turbo ? <Badge tone="ok">وضع مرعب ⚡</Badge> : <Badge tone="neutral">وضع عادي</Badge>}
+          {session.deletePending > 0 ? <Badge tone="warn">Delete في الخلفية: {session.deletePending}</Badge> : null}
           <Badge tone={stats.withDrugs ? "ok" : "neutral"}>بها دواء: {stats.withDrugs}</Badge>
           <Badge tone="neutral">بدون دواء: {stats.withoutDrugs}</Badge>
           <Badge tone="warn">خارج المدة: {stats.invalid}</Badge>
+          <Badge tone={stats.failed ? "bad" : "ok"}>متعثرة: {stats.failed}</Badge>
         </div>
       </Card>
 

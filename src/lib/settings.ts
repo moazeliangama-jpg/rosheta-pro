@@ -11,6 +11,7 @@ export const defaultSettings: Settings = {
   sessionTime: "08:30",
   reportTime: "20:00",
   workerChoice: "auto",
+  turboMode: true,
   validityDays: 6,
   preventDelete: false,
   includeInvalid: false,
