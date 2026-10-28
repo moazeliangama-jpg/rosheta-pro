@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Save,
   Search,
+  ShieldCheck,
   ShieldOff,
   Upload,
   XCircle,
@@ -47,6 +48,7 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [probeResult, setProbeResult] = useState<string>("");
   const [error, setError] = useState("");
+  const [dragging, setDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const workplaces = useMemo(() => groupByWorkplace(patients), [patients]);
@@ -62,7 +64,23 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
     const b = bridge();
     if (!b) return;
     void b.wa.status().then((res) => setWaState(String(res?.state ?? "closed")));
-  }, []);
+    // بيانات الدخول بقت مشفّرة على القرص (مش نص صريح في الإعدادات)
+    void b.credentials.load().then((res) => {
+      if (!res?.ok || !res.data) return;
+      setSettings({ niceDeerUser: res.data.username, niceDeerPass: res.data.password });
+    });
+  }, [setSettings]);
+
+  /** حفظ مشفّر لبيانات الدخول — بيتنادى بعد نجاح الدخول أو لو اليوزر طلب */
+  const saveCredentials = async () => {
+    const b = bridge();
+    if (!b) return;
+    const res = await b.credentials.save({
+      username: settings.niceDeerUser,
+      password: settings.niceDeerPass,
+    });
+    if (!res.ok) setError(res.error ?? "تعذر حفظ بيانات الدخول");
+  };
 
   const doLogin = async () => {
     if (!hasDesktopBridge()) return;
@@ -74,6 +92,7 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
       await b.setCredentials({ username: settings.niceDeerUser, password: settings.niceDeerPass });
       const res = await b.login({ username: settings.niceDeerUser, password: settings.niceDeerPass });
       if (res.ok) {
+        await saveCredentials();
         setLoggedIn(true);
         setLoginNote(res.already ? "الجلسة مسجلة بالفعل — مفيش حاجة تتعمل." : "تم تسجيل الدخول بنجاح.");
         logLine("ok", "تسجيل دخول نايس دير ناجح.");
@@ -144,7 +163,7 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
 
       {/* 1) نايس دير */}
       <Card>
-        <SectionTitle hint="بيتحفظ محليًا على الجهاز">١. دخول نايس دير والباير</SectionTitle>
+        <SectionTitle hint="بيتحفظوا مشفّرين على الجهاز — مش نص صريح">١. دخول نايس دير والباير</SectionTitle>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field
             label="اسم المستخدم"
@@ -185,6 +204,15 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
             <Button onClick={() => void doLogin()} disabled={busy === "login" || !hasDesktopBridge()} className="flex-1">
               {busy === "login" ? <RefreshCw className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
               اختبار الدخول
+            </Button>
+            <Button
+              variant="muted"
+              onClick={() => void saveCredentials()}
+              disabled={!settings.niceDeerUser || !settings.niceDeerPass || !hasDesktopBridge()}
+              title="بيتحفظوا مشفّرين بمفتاح ويندوز — مش نص صريح"
+            >
+              <ShieldCheck className="h-4 w-4" />
+              حفظ
             </Button>
           </div>
         </div>
@@ -265,8 +293,22 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
       </Card>
 
       {/* 2) السابات */}
-      <Card>
-        <SectionTitle hint="الساب + الاسم + مكان العمل">٢. ملف السابات (Excel)</SectionTitle>
+      <Card
+        // ٨٠) سحب وإفلات ملف Excel على البطاقة نفسها
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          const f = e.dataTransfer?.files?.[0];
+          if (f) void doUpload(f);
+        }}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        className={dragging ? "border-teal-400/60 bg-teal-500/5" : undefined}
+      >
+        <SectionTitle hint="الساب + الاسم + مكان العمل — أو اسحب الملف هنا">٢. ملف السابات (Excel)</SectionTitle>
         <div className="flex flex-wrap items-center gap-3">
           <input
             ref={fileRef}

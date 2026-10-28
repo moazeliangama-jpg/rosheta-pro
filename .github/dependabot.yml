@@ -1,0 +1,31 @@
+# ٩٩) تحديث الاعتماديات بشكل دوري — أهمها Electron نفسه (أمان + أداء Chromium)
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Electron لوحده: تحديثه بيغيّر محرك Chromium كله، فبيتراجع بحاله
+      electron:
+        patterns:
+          - "electron"
+          - "electron-builder"
+      # الباقي (React، Vite، أدوات) بيتجمّع في PR واحد
+      tooling:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "electron"
+          - "electron-builder"
+    ignore:
+      # تحديثات الـ major بتحتاج تجربة على جهاز حقيقي — بنعملها يدوي
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

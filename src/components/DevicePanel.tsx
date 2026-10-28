@@ -44,6 +44,17 @@ export function DevicePanel() {
   const [error, setError] = useState("");
   // ١٢٧) صيانة ملفات اللوج والتشخيص
   const [files, setFiles] = useState<MaintenanceInfo | null>(null);
+  // ٩٦) حالة التحديث
+  const [update, setUpdate] = useState<null | {
+    available: boolean;
+    canInstall?: boolean;
+    latest?: string;
+    current?: string;
+    asset?: string;
+    url?: string;
+    message: string;
+  }>(null);
+  const [updateBusy, setUpdateBusy] = useState<null | "check" | "download" | "run">(null);
   const [cleanBusy, setCleanBusy] = useState<null | "stats" | "prune" | "clear">(null);
 
   const runPreflight = async () => {
@@ -114,6 +125,44 @@ export function DevicePanel() {
       }
     } finally {
       setCleanBusy(null);
+    }
+  };
+
+  /** ٩٦) فحص/تنزيل/تثبيت تحديث حقيقي من GitHub Releases */
+  const checkUpdate = async () => {
+    const b = bridge();
+    if (!b) return;
+    setUpdateBusy("check");
+    setError("");
+    try {
+      const res = await b.updates.check();
+      if (!res.ok || !res.data) {
+        setError(res.error || "فحص التحديث فشل — اتأكد من الاتصال");
+        return;
+      }
+      setUpdate(res.data);
+      logLine(res.data.available ? "warn" : "ok", res.data.message);
+    } finally {
+      setUpdateBusy(null);
+    }
+  };
+
+  const installUpdate = async () => {
+    const b = bridge();
+    if (!b || !update?.url || !update.asset) return;
+    setUpdateBusy("download");
+    setError("");
+    try {
+      const res = await b.updates.download({ url: update.url, asset: update.asset });
+      if (!res.ok || !res.data) {
+        setError(res.error || "تنزيل التحديث فشل");
+        return;
+      }
+      logLine("ok", `التحديث اتنزّل (${Math.round(res.data.bytes / 1024 / 1024)} ميجا) — البرنامج هيتقفل ويثبّت نفسه.`);
+      setUpdateBusy("run");
+      await b.updates.run({ file: res.data.file });
+    } finally {
+      setUpdateBusy(null);
     }
   };
 
@@ -259,6 +308,34 @@ export function DevicePanel() {
           «فحص السلكتورات» بيفتح صفحة البحث الحقيقية مرة واحدة ويقرأ كل العناصر المهمة.
         </div>
       )}
+
+      {/* ٩٦) تحديث البرنامج من GitHub Releases */}
+      <div className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 text-[11px]">
+          <span className="font-semibold text-white/70">تحديث البرنامج</span>
+          {update ? (
+            <span className={update.available ? "text-amber-300" : "text-white/45"}>{update.message}</span>
+          ) : (
+            <span className="text-white/30">بيتأكد من آخر إصدار منشور على GitHub</span>
+          )}
+          <div className="ms-auto flex items-center gap-1.5">
+            <Button size="sm" variant="muted" onClick={() => void checkUpdate()} disabled={updateBusy !== null}>
+              <RefreshCw className={updateBusy === "check" ? "h-3.5 w-3.5 animate-spin" : "h-3.5 w-3.5"} /> فحص التحديث
+            </Button>
+            {update?.canInstall ? (
+              <Button size="sm" onClick={() => void installUpdate()} disabled={updateBusy !== null}>
+                <Download className={updateBusy ? "h-3.5 w-3.5 animate-pulse" : "h-3.5 w-3.5"} />
+                {updateBusy === "download" ? "بينزّل…" : "نزّل وثبّت"}
+              </Button>
+            ) : null}
+          </div>
+        </div>
+        {update?.available && !update.canInstall ? (
+          <div className="mt-1 text-[10px] text-white/35">
+            مفيش ملف .exe في الإصدار الأخير — افتح صفحة الإصدارات واعمل التحديث يدوي.
+          </div>
+        ) : null}
+      </div>
 
       {/* ١٢٧) اللوجات واللقطات: بنعرض الحجم الحقيقي وبننضّف بضغطة */}
       <div className="mt-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2">

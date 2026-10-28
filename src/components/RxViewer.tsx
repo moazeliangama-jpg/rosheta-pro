@@ -141,6 +141,8 @@ export function RxImage({ c, className, onRetry }: { c: CaseRecord; className?: 
       <img
         src={src}
         alt={`روشتة ${c.sab} — ${c.reference}`}
+        loading="lazy"
+        decoding="async"
         onLoad={() => setDrawn(true)}
         onError={() => setBroken(true)}
         style={{ transform: `rotate(${c.rotation ?? 0}deg)` }}

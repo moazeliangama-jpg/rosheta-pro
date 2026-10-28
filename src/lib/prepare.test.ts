@@ -73,3 +73,24 @@ test("سطر التوضيح بيقول إيه اللي اتخطى", () => {
   assert.match(note, /غير موجود/);
   assert.match(note, /الشغل على 5 ساب/);
 });
+
+test("نقطة استكمال مش موجودة في الملف — بنشتغل على القائمة كلها (مش بنتخطى الكل)", () => {
+  const patients = [
+    { sab: "111", name: "أ", phone: "", workplace: "و" },
+    { sab: "222", name: "ب", phone: "", workplace: "و" },
+  ];
+  const res = preparePatients(patients, { day: "2026-10-28", resumeAfter: "999" });
+  assert.equal(res.list.length, 2, "القائمة اتخطّت كلها بسبب نقطة استكمال قديمة");
+  assert.equal(res.stats.resumed, 0);
+});
+
+test("نقطة الاستكمال الموجودة بتتخطى اللي قبلها بس", () => {
+  const patients = [
+    { sab: "111", name: "أ", phone: "", workplace: "و" },
+    { sab: "222", name: "ب", phone: "", workplace: "و" },
+    { sab: "333", name: "ج", phone: "", workplace: "و" },
+  ];
+  const res = preparePatients(patients, { day: "2026-10-28", resumeAfter: "222" });
+  assert.equal(res.list.length, 1);
+  assert.equal(res.list[0].sab, "333");
+});

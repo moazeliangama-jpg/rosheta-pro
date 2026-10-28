@@ -144,6 +144,31 @@ export function DecisionScreen({
     else setViewer(null);
   };
 
+  /**
+   * ٢٦) تحميل الصور اللي بعد كده مسبقًا (٣ قدام) — القرار بيمشي بسرعة
+   * من غير ما نستنى IndexedDB في كل روشتة.
+   */
+  useEffect(() => {
+    if (!viewerId) return;
+    const list = filtered.filter((c) => c.valid && c.hasDrugs === null && c.rx.status === "ready");
+    const idx = list.findIndex((c) => c.id === viewerId);
+    if (idx < 0) return;
+    let alive = true;
+    void import("../lib/imageCache").then(({ getCachedImage, putCachedImage }) =>
+      import("../lib/imageStore").then(({ loadImage }) => {
+        for (const c of list.slice(idx + 1, idx + 4)) {
+          if (getCachedImage(c.id)) continue;
+          void loadImage(c.id).then((url) => {
+            if (alive && url) putCachedImage(c.id, url);
+          });
+        }
+      }),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [viewerId, filtered]);
+
   // ٧٦) اختصارات لوحة المفاتيح: ١ بها دواء، ٢ بدون، مسافة = اللي بعدها
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

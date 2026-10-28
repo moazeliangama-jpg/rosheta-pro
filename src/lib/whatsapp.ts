@@ -52,7 +52,11 @@ export function buildOutreachQueue(
   settings: Settings,
   existing: OutreachMessage[] = [],
 ): OutreachMessage[] {
-  const sentKeys = new Set(existing.map((m) => `${m.sab}::${m.kind}`));
+  // «اتبعت خلاص» = sent بس. الرسالة اللي فشلت لازم تتعاد في الجولة الجاية،
+  // وإلا الساب اللي اتبعتله مرة وفشلت يفضل من غير رسالة للأبد.
+  const sentKeys = new Set(
+    existing.filter((m) => m.status === "sent").map((m) => `${m.sab}::${m.kind}`),
+  );
   const bySab = new Map<string, CaseRecord[]>();
   for (const c of cases) {
     if (!bySab.has(c.sab)) bySab.set(c.sab, []);

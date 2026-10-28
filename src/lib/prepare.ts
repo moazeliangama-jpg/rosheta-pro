@@ -65,7 +65,11 @@ export function preparePatients(patients: PatientRow[], opts: PrepareOptions): P
   };
   const rows: Array<PatientRow & { weight: number }> = [];
 
-  let skipping = Boolean(opts.resumeAfter);
+  // لو آخر ساب اتحفظ مش موجود في الملف الحالي (ملف اتغير أو ساب اتصلح)،
+  // لازم نبدأ من الأول — قبل كده كنا بنتخطى القائمة كلها وبنطلع «مفيش سابات».
+  const resume = opts.resumeAfter ? normalizeSab(opts.resumeAfter) : "";
+  const resumable = resume && normalized.list.some((p) => p.sab === resume) ? resume : "";
+  let skipping = Boolean(resumable);
   for (const p of normalized.list) {
     const sab = p.sab;
     if (seen.has(sab)) {
@@ -77,7 +81,7 @@ export function preparePatients(patients: PatientRow[], opts: PrepareOptions): P
     if (skipping) {
       stats.resumed += 1;
       // الساب اللي اكتمل قبل الوقفة بيتخطى هو كمان، وبعده نكمّل عادي
-      if (sab === opts.resumeAfter) skipping = false;
+      if (sab === resumable) skipping = false;
       continue;
     }
 

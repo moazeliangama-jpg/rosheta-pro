@@ -60,6 +60,30 @@ export interface RoshettaBridge {
   }) => Promise<BridgeResult<MaintenanceInfo & { dir?: string }>>;
   /** ٦٠) نسخة احتياطية يومية: الملف بيتحفظ في بيانات البرنامج */
   backup: (p: { name: string; json: string }) => Promise<BridgeResult<{ file: string; bytes: number }>>;
+  /** ٩٦) تحديث البرنامج: فحص الإصدار، تنزيل المثبّت، وتشغيله */
+  updates: {
+    check: () => Promise<
+      BridgeResult<{
+        available: boolean;
+        canInstall?: boolean;
+        latest?: string;
+        current?: string;
+        asset?: string;
+        url?: string;
+        size?: number;
+        message: string;
+        htmlUrl?: string;
+      }>
+    >;
+    download: (p: { url: string; asset?: string }) => Promise<BridgeResult<{ file: string; bytes: number }>>;
+    run: (p: { file: string }) => Promise<BridgeResult<{ file: string }>>;
+  };
+  /** بيانات دخول نايس دير مشفّرة بمفتاح النظام (مش localStorage) */
+  credentials: {
+    save: (p: { username: string; password: string }) => Promise<BridgeResult>;
+    load: () => Promise<BridgeResult<{ username: string; password: string } | null>>;
+    clear: () => Promise<BridgeResult>;
+  };
   login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
   searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<

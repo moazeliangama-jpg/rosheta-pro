@@ -1,12 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Activity, ClipboardList, FlaskConical, ListChecks, Settings2, ShieldOff } from "lucide-react";
 import { useAppStore } from "./lib/store";
 import { SessionEngine, refreshValidity } from "./lib/engine";
 import { hasDesktopBridge, bridge } from "./lib/provider";
-import { SetupScreen } from "./screens/SetupScreen";
-import { RunScreen } from "./screens/RunScreen";
-import { DecisionScreen } from "./screens/DecisionScreen";
-import { ResultsScreen } from "./screens/ResultsScreen";
+// ٥٨) الشاشات بتتحمّل وقت الحاجة — فتح البرنامج بيبقى أسرع
+const SetupScreen = lazy(() => import("./screens/SetupScreen").then((m) => ({ default: m.SetupScreen })));
+const RunScreen = lazy(() => import("./screens/RunScreen").then((m) => ({ default: m.RunScreen })));
+const DecisionScreen = lazy(() => import("./screens/DecisionScreen").then((m) => ({ default: m.DecisionScreen })));
+const ResultsScreen = lazy(() => import("./screens/ResultsScreen").then((m) => ({ default: m.ResultsScreen })));
+
+function ScreenFallback() {
+  return (
+    <div className="grid min-h-[40vh] place-items-center text-sm text-white/40">
+      <div className="flex items-center gap-2">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-teal-400/40 border-t-teal-400" />
+        بيفتح الشاشة…
+      </div>
+    </div>
+  );
+}
 import { Badge, Button, Card } from "./components/ui";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { exportApproved } from "./lib/excel";
@@ -283,6 +295,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
       ) : null}
 
       <main className={settings.compactMode ? "relative mx-auto max-w-[1200px] px-2 py-2" : "relative mx-auto max-w-[1500px] px-4 py-4"}>
+        <Suspense fallback={<ScreenFallback />}>
         {screen === "setup" ? (
           <SetupScreen
             onScan={() => startEngine({ fresh: true, scan: true, images: false })}
@@ -300,6 +313,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
         ) : null}
         {screen === "decision" ? <DecisionScreen onRetry={retryOne} onRescanSab={rescanSab} /> : null}
         {screen === "results" ? <ResultsScreen /> : null}
+        </Suspense>
       </main>
 
       {session.state === "done" && screen !== "decision" ? (
