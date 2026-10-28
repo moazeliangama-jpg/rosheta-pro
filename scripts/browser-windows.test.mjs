@@ -142,3 +142,16 @@ test("فشل صورة الروشتة بيرجّع دليل مكتوب (صفحة 
   assert.match(body, /saveWindowEvidence\(win, `image-/, "فشل الصورة لازم يحفظ دليل");
   assert.match(body, /الدليل: \$\{Object\.values\(evidence\)/, "مسار الدليل لازم يظهر في رسالة الفشل");
 });
+
+test("النافذة على أي صفحة نايس دير من غير SearchCode بتفتح صفحة البحث (مش دخول جديد)", () => {
+  const start = main.indexOf("async function ensureSearchPage(");
+  assert.ok(start > 0, "مش لاقي ensureSearchPage");
+  const body = main.slice(start, main.indexOf("async function ", start + 10));
+  // ممنوع شرط «لو مش على نايس دير» اللي كان بيخلي النافذة تفضل على لوحة التحكم
+  assert.doesNotMatch(body, /!\(state\.url \|\| \"\"\)\.includes\(\"nicedeer\"\)/, "الشرط القديم لسه موجود");
+  assert.match(body, /await safeLoad\(win, SEARCH_URL\)/, "لازم تحميل صفحة البحث فعليًا");
+  // الدخول آخر حل، وبعد التأكد إن الصفحة فعلاً مش بتفتح
+  const loadAt = body.indexOf("await safeLoad(win, SEARCH_URL)");
+  const loginAt = body.indexOf("loginIntoIsolatedWindow");
+  assert.ok(loginAt > loadAt, "الدخول لازم يبقى بعد محاولة فتح صفحة البحث");
+});

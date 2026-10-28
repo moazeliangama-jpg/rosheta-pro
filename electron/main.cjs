@@ -1889,19 +1889,37 @@ async function ensureSearchPage(win, credentials) {
     win.__rpReady = true;
     return "ready";
   }
-  // لو النافذة على صفحة روشتة/نتائج قديمة: رجوع سريع بدل تحميل جديد وبحث جديد
-  if (state && (state.url || "").includes("nicedeer") && (await backToResults(win))) {
+
+  const url = String(state?.url || "");
+
+  // على صفحة روشتة/مطالبة قديمة: رجوع سريع بدل تحميل كامل
+  if (isPrescriptionUrl(url) && (await backToResults(win))) {
     win.__rpReady = true;
     return "back";
   }
-  if (!state || !(state.url || "").includes("nicedeer")) {
+
+  /**
+   * أي صفحة تانية — **حتى لو على نايس دير** (لوحة تحكم، الصفحة الرئيسية،
+   * صفحة دخول): بنفتح صفحة البحث مباشرة.
+   *
+   * ده كان بيوقف البرنامج: لو النافذة كانت على أي صفحة نايس دير من غير
+   * `#SearchCode`، الشرط القديم كان بيتخطى تحميل صفحة البحث ويروح يعمل
+   * **دخول من أول وجديد** — فالمستخدم يشوف متصفح مفتوح على الموقع ومفيش أي
+   * خطوة بتتعمل. الصح: تحميل صفحة البحث، والدخول بس لو الصفحة مارضيتش تفتح.
+   */
+  if (url !== SEARCH_URL) {
     await safeLoad(win, SEARCH_URL);
-    const after = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
-    if (after) return "loaded";
+    if (await run(win, S.waitForSelectorScript("#SearchCode", 15000))) {
+      win.__rpReady = true;
+      return "loaded";
+    }
   }
+
   const how = await loginIntoIsolatedWindow(win, credentials);
-  const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
-  if (!ok) throw new Error("صفحة البحث في نايس دير لم تظهر");
+  if (!(await run(win, S.waitForSelectorScript("#SearchCode", 15000)))) {
+    throw new Error("صفحة البحث في نايس دير لم تظهر");
+  }
+  win.__rpReady = true;
   return how;
 }
 
