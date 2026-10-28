@@ -1,0 +1,45 @@
+# إعدادات تغليف نسخة سطح المكتب — روشتة برو
+appId: com.roshettapro.app
+productName: Roshetta Pro
+copyright: Roshetta Pro
+
+directories:
+  output: release
+  buildResources: build
+
+# تجميع التطبيق في ملف واحد داخل المثبّت
+asar: true
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - build/icon.png
+  - package.json
+  # الواجهة ملف واحد وكل اعتمادياتها مدمجة؛ نمنع node_modules لتصغير المثبت كثيرًا.
+  - "!node_modules/**/*"
+
+extraMetadata:
+  main: electron/main.cjs
+  version: 1.0.0
+  description: نظام تحليل استمارات نايس دير — روشتة برو
+  author: Roshetta Pro
+
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+    - portable
+
+# مثبّت Windows واحد يحوي كل شيء
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: روشتة برو
+  artifactName: RoshettaPro-Setup-${version}.${ext}
+
+# نسخة محمولة بدون تثبيت (اختيارية)
+portable:
+  artifactName: RoshettaPro-Portable-${version}.${ext}
