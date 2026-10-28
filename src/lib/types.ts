@@ -245,6 +245,8 @@ export interface Settings {
   reducedMotion: boolean;
   /** دخول تلقائي على نايس دير عند فتح البرنامج بالبيانات المحفوظة */
   autoLogin: boolean;
+  /** إبلاغ تلقائي عن الأخطاء غير المتوقعة على GitHub (منقّح، بدون بيانات مرضى) */
+  errorReporting: boolean;
   lastReportDate: string;
   lastAutoSessionDate: string;
   lastScanAt: number;

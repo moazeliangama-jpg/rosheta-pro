@@ -8,7 +8,12 @@ export function cn(...inputs: ClassValue[]) {
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export function uid(prefix = "id") {
-  return `${prefix}_${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
+  // crypto.randomUUID أقوى من Math.random وبيقلل احتمال التصادم في الجلسات الطويلة
+  const rand =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID().replace(/-/g, "").slice(0, 10)
+      : `${Math.random().toString(36).slice(2, 9)}${Date.now().toString(36).slice(-4)}`;
+  return `${prefix}_${rand}`;
 }
 
 export const arNum = (n: number) => new Intl.NumberFormat("ar-EG", { maximumFractionDigits: 1 }).format(n);

@@ -85,7 +85,7 @@ export function mergeCase(prev: CaseRecord | undefined, next: CaseRecord): CaseR
   };
 }
 
-interface AppState {
+export interface AppState {
   settings: Settings;
   patients: PatientRow[];
   cases: Record<string, CaseRecord>;
@@ -247,6 +247,40 @@ function debouncedStorage() {
         /* تجاهل */
       }
     },
+  };
+}
+
+/**
+ * اللي بيتحفظ فعلًا في `localStorage` — دالة نقية عشان تتاختبر.
+ *
+ * قواعد متعمّدة:
+ *  • كلمة سر نايس دير **عمرها ما بتتحفظ** (مكانها التخزين المشفّر في العملية الرئيسية).
+ *  • `dataUrl` بتاعة الصور بتتشال (الصور في IndexedDB) — وإلا المفتاح يتملى بسرعة.
+ *  • السجلات والقياسات بتتقصّر عشان الحفظ يفضل سريع.
+ */
+export function persistSlice(s: AppState) {
+  const settings = { ...s.settings, niceDeerPass: "" };
+  return {
+    settings,
+    patients: s.patients,
+    cases: Object.fromEntries(
+      Object.entries(s.cases).map(([id, c]) => [id, { ...c, rx: { ...c.rx, dataUrl: undefined } }]),
+    ),
+    caseOrder: s.caseOrder,
+    monthly: s.monthly,
+    failed: s.failed,
+    sabCache: s.sabCache,
+    seenForms: s.seenForms,
+    hourly: s.hourly,
+    history: s.history.slice(0, 30),
+    profiles: s.profiles,
+    outreach: s.outreach,
+    session: s.session,
+    screen: s.screen,
+    lastDecisionId: s.lastDecisionId,
+    log: s.log.slice(0, 250),
+    samples: s.samples.slice(-150),
+    steps: s.steps.slice(-1200),
   };
 }
 
@@ -592,29 +626,7 @@ export const useAppStore = create<AppState>()(
        * الواجهة المؤقتة، وكل خريطة الحالات — وده كان بيقرّب من حد localStorage
        * (٥ ميجا) وبيبطّأ كل حفظ.
        */
-      partialize: (s) => ({
-        settings: { ...s.settings, niceDeerPass: "" },
-        patients: s.patients,
-        // الصور مش بتتحفظ هنا — مكانها IndexedDB (صورة base64 بتاكل مساحة المفتاح كله)
-        cases: Object.fromEntries(
-          Object.entries(s.cases).map(([id, c]) => [id, { ...c, rx: { ...c.rx, dataUrl: undefined } }]),
-        ),
-        caseOrder: s.caseOrder,
-        monthly: s.monthly,
-        failed: s.failed,
-        sabCache: s.sabCache,
-        seenForms: s.seenForms,
-        hourly: s.hourly,
-        history: s.history.slice(0, 30),
-        profiles: s.profiles,
-        outreach: s.outreach,
-        session: s.session,
-        screen: s.screen,
-        lastDecisionId: s.lastDecisionId,
-        log: s.log.slice(0, 250),
-        samples: s.samples.slice(-150),
-        steps: s.steps.slice(-1200),
-      }),
+      partialize: persistSlice,
       onRehydrateStorage: () => (state) => {
         if (!state) return;
         if (state.session.state === "running" || state.session.state === "paused" || state.session.state === "scanning") {

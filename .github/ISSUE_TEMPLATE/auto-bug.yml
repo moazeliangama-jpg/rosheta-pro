@@ -1,0 +1,36 @@
+name: بلاغ خطأ تلقائي من روشتة برو
+description: بلاغ بيتولّد لوحده من البرنامج عند خطأ غير متوقع — مش محتاج تعديل
+title: "[auto] …"
+labels: ["auto-bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > ⚙️ **البلاغ ده اتفتح تلقائيًا** من نسخة روشتة برو على جهاز المستخدم.
+        > الأرقام الطويلة (سواب/تليفونات)، الإيميلات، مسارات المستخدم، وبيانات الدخول
+        > اتشالت تلقائيًا قبل الإرسال. راجع الجدول والـstack تحت.
+
+  - type: textarea
+    id: stack
+    attributes:
+      label: Stack trace
+      description: مكان الخطأ بالظبط (منقّح من البيانات الحساسة)
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: fingerprint
+    attributes:
+      label: البصمة
+      description: نفس البصمة = نفس الخطأ؛ البلاغات المتكررة بتتشال في ٢٤ ساعة
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: triage
+    attributes:
+      label: متابعة
+      options:
+        - label: اتأكدت إن الخطأ لسه بيحصل على آخر إصدار
+        - label: اتصلّح في PR رقم…

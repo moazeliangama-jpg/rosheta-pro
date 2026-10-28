@@ -33,6 +33,7 @@ export const defaultSettings: Settings = {
   tourSeen: false,
   reducedMotion: false,
   autoLogin: false,
+  errorReporting: true,
   lastReportDate: "",
   lastAutoSessionDate: "",
   lastScanAt: 0,
