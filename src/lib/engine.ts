@@ -331,7 +331,12 @@ export class SessionEngine {
         .filter((c) => useAppStore.getState().cases[c.id]?.rx.status !== "ready")
         .sort((a, b) => (a.formDateISO || "").localeCompare(b.formDateISO || ""));
 
-      if (queue.length) useAppStore.getState().patchSession({ phase: "images" });
+      const st = useAppStore.getState();
+      st.patchSession({
+        phase: queue.length ? "images" : "scan",
+        // العدد الإجمالي المعروف لحد دلوقتي — شريط التقدم بيفضل واقعي
+        formsTotal: Object.values(st.cases).filter((c) => c.valid || s.includeInvalid).length,
+      });
 
       for (const c of queue) {
         while (this.paused && !this.cancelled) await sleep(150);
