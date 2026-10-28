@@ -14,25 +14,31 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [1/3] تثبيت الحزم...
+echo [1/4] تثبيت الحزم...
 call npm install
 if errorlevel 1 goto fail
 
 echo.
-echo [2/3] بناء واجهة التطبيق...
+echo [2/4] فحص إعدادات التغليف والأيقونة...
+call npm run check:packaging
+if errorlevel 1 goto fail
+
+echo.
+echo [3/4] بناء واجهة التطبيق...
 call npm run build
 if errorlevel 1 goto fail
 
 echo.
-echo [3/3] تغليف ملف التثبيت EXE (قد يستغرق بضع دقائق أول مرة)...
+echo [4/4] تغليف ملف التثبيت EXE (قد يستغرق بضع دقائق أول مرة)...
 call npx electron-builder --win nsis portable --config electron-builder.yml
 if errorlevel 1 goto fail
 
 echo.
 echo ==================================================
 echo    تم البناء بنجاح!
-echo    ملف التثبيت: release\RoshettaPro-Setup-1.0.0.exe
-echo    نسخة محمولة بدون تثبيت: release\RoshettaPro-Portable-1.0.0.exe
+echo    ملف التثبيت: release\RoshettaPro-Setup-<version>.exe
+echo    نسخة محمولة بدون تثبيت: release\RoshettaPro-Portable-<version>.exe
+echo    الجهاز المستهدف مش محتاج Node.js ولا أي شيء آخر — كل حاجة داخل الملف.
 echo ==================================================
 explorer release
 pause

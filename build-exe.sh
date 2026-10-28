@@ -5,6 +5,9 @@ set -e
 echo "==> تثبيت الحزم"
 npm install
 
+echo "==> فحص إعدادات التغليف"
+npm run check:packaging
+
 echo "==> بناء واجهة التطبيق"
 npm run build
 

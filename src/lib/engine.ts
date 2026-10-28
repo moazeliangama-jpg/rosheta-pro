@@ -768,6 +768,16 @@ export class SessionEngine {
 
     store.setRxStatus(c.id, { status: "failed", attempts: MAX_ATTEMPTS, reason: lastError, updatedAt: Date.now() });
     this.fail(lastError || "فشل جلب الصورة بعد ٣ محاولات", "صورة", c.sab, c.patientName, c.workplace, c.reference);
+
+    // ٧٠) في وضع Debug: لقطة HTML وقت الفشل (اختيارية) — بتفرّق بين «الموقع اتغير» و«الصورة بطيئة»
+    if (s.debugMode) {
+      try {
+        const dump = await b.dumpHtml({ sab: c.sab, reason: `capture-${c.reference}` });
+        if (dump?.ok) this.log("warn", `اتحفظت لقطة HTML لفشل الصورة ${c.reference}: ${dump.data?.file ?? ""}`);
+      } catch {
+        /* اللقطة مش شرط */
+      }
+    }
   }
 
   /** لو طابور الإرجاع اتخنق، بنهدّي جلب الصور شوية بدل تكديس أكتر */

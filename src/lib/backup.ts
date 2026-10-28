@@ -61,7 +61,7 @@ export function currentBundle(): Bundle | null {
  */
 export async function runDailyBackup(now = new Date()): Promise<{ day: string; bytes: number } | null> {
   const b = bridge();
-  if (!b) return null;
+  if (!b || typeof b.backup !== "function") return null;
   const day = dateKey(now);
   if (!shouldBackup(readStored(), day)) return null;
 
@@ -69,7 +69,12 @@ export async function runDailyBackup(now = new Date()): Promise<{ day: string; b
   if (!bundle) return null;
 
   const json = JSON.stringify(bundle);
-  const res = await b.backup({ name: backupName(now), json });
+  let res;
+  try {
+    res = await b.backup({ name: backupName(now), json });
+  } catch {
+    return null; // النسخة الاحتياطية مش حاجة توقف البرنامج
+  }
   if (!res.ok) return null;
 
   writeStored(day);
