@@ -5,3 +5,4 @@ build/
 scripts/.smoke/
 *.log
 .DS_Store
+scripts/.tests/

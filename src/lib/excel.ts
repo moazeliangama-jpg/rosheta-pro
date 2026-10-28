@@ -1,119 +1,196 @@
 import * as XLSX from "xlsx";
-import type { CaseRecord, FailedRecord, OutreachMessage, PatientRow, FormRow, SpeedSample } from "./types";
-import { arNum, dateKey, downloadBlob, safeName } from "./utils";
+import type { CaseRecord, FailedRecord, MonthlyCheck, OutreachMessage, PatientRow, SpeedSample } from "./types";
+import { dateKey, downloadBlob, safeName } from "./utils";
 
-/** يقرأ شيت Excel كصفوف عامة */
-export async function readWorkbook(file: File): Promise<{ patients: PatientRow[]; forms: FormRow[] }> {
+const SOURCE_LABEL: Record<string, string> = {
+  "pre-approval": "Pre-Approval",
+  claim: "Claim",
+};
+
+/** يقرأ ملف السابات: الساب + الاسم + مكان العمل (+ تليفون لو موجود) */
+export async function readPatientsFile(file: File): Promise<PatientRow[]> {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { cellDates: true });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+
+  const pick = (row: Record<string, unknown>, keys: string[]) => {
+    for (const k of Object.keys(row)) {
+      const norm = k.trim();
+      if (keys.some((x) => norm === x || norm.includes(x))) {
+        const v = row[k];
+        if (v instanceof Date) return dateKey(v);
+        const s = String(v ?? "").trim();
+        if (s) return s;
+      }
+    }
+    return "";
+  };
+
   const patients: PatientRow[] = [];
-  const forms: FormRow[] = [];
-
-  const pickSheet = (names: string[]) =>
-    wb.SheetNames.find((n) => names.some((x) => n.trim().includes(x))) ?? wb.SheetNames[0];
-
-  const patientSheet = wb.Sheets[pickSheet(["ساب", "مرض", "patient", "أسماء"])];
-  const formSheet = wb.Sheets[pickSheet(["استمار", "form", "روشت"])];
-
-  if (patientSheet) {
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(patientSheet, { defval: "" });
-    for (const r of rows) {
-      const sab = str(r["الساب"] ?? r["sab"] ?? r["SAB"] ?? r["Sub"] ?? r["رقم الساب"]);
-      if (!sab) continue;
-      patients.push({
-        sab,
-        name: str(r["الاسم"] ?? r["اسم المريض"] ?? r["name"] ?? r["Name"]),
-        phone: str(r["التليفون"] ?? r["الهاتف"] ?? r["phone"] ?? r["mobile"]),
-        workplace: str(r["مكان العمل"] ?? r["العمل"] ?? r["workplace"]),
-        buyer: str(r["الباير"] ?? r["buyer"]),
-      });
-    }
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const sab = pick(row, ["الساب", "sab", "Sub", "Card", "كارت"]);
+    if (!sab || seen.has(sab)) continue;
+    seen.add(sab);
+    patients.push({
+      sab,
+      name: pick(row, ["الاسم", "اسم المريض", "name", "Name"]),
+      phone: pick(row, ["التليفون", "الهاتف", "الموبايل", "phone", "mobile"]),
+      workplace: pick(row, ["مكان العمل", "العمل", "الجهة", "workplace", "employer"]),
+    });
   }
-
-  if (formSheet && formSheet !== patientSheet) {
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(formSheet, { defval: "" });
-    for (const r of rows) {
-      const sab = str(r["الساب"] ?? r["sab"] ?? r["Sub"]);
-      const formId = str(r["رقم الاستمارة"] ?? r["الاستمارة"] ?? r["form"] ?? r["ID"]);
-      if (!sab || !formId) continue;
-      const type = str(r["النوع"] ?? r["نوع الاستمارة"] ?? r["type"]);
-      forms.push({
-        formId,
-        sab,
-        formType: type,
-        formLabel: `استمارة ${formId}`,
-        date: dateStr(r["التاريخ"] ?? r["تاريخ"] ?? r["date"]),
-        isMonthly: /شهر|month/i.test(type),
-      });
-    }
-  }
-
-  return { patients, forms };
+  return patients;
 }
 
-function str(v: unknown) {
-  if (v === null || v === undefined) return "";
-  return String(v).trim();
-}
-
-function dateStr(v: unknown) {
-  if (v instanceof Date) return dateKey(v);
-  const s = str(v);
-  return s;
-}
-
-export function exportFailed(failed: FailedRecord[], meta: Record<string, string | number>) {
-  const wb = XLSX.utils.book_new();
-  const rows = failed.map((f) => ({
-    الساب: f.sab,
-    الاسم: f.patientName,
-    "مكان العمل": f.workplace,
-    الخطوة: f.step,
-    الاستمارة: f.form,
-    السبب: f.reason,
-    الوقت: new Date(f.at).toLocaleString("ar-EG"),
-  }));
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "سابات متعثرة");
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([meta]), "ملخص الجلسة");
-  write(wb, `روشتة-برو-سابات-متعثرة-${dateKey()}.xlsx`);
-}
-
-export function exportAvailable(cases: CaseRecord[]) {
+/** 1) جرد الاستمارات: كل ساب وعدد استماراته وأرقامها المرجعية وأنواعها */
+export function exportAnalysis(cases: CaseRecord[]) {
   const bySab = new Map<string, CaseRecord[]>();
   for (const c of cases) {
-    if (c.drugs !== "available" && c.monthly !== "available") continue;
     if (!bySab.has(c.sab)) bySab.set(c.sab, []);
     bySab.get(c.sab)!.push(c);
   }
   const rows = [...bySab.values()].map((list) => {
     const first = list[0];
+    const valid = list.filter((c) => c.valid);
     return {
-      الاسم: first.patientName,
       الساب: first.sab,
+      الاسم: first.patientName,
       "رقم التليفون": first.phone,
-      "نوع الاستمارات": [...new Set(list.map((c) => c.formType))].join("، "),
+      "مكان العمل": first.workplace,
       "عدد الاستمارات": list.length,
-      الحساب: "",
+      "عدد داخل المدة": valid.length,
+      "الأرقام المرجعية": valid.map((c) => c.reference).join("، "),
+      "نوع كل استمارة": valid.map((c) => `${SOURCE_LABEL[c.source] ?? c.source}${c.monthly ? " (شهري)" : ""}`).join("، "),
+      "التواريخ": valid.map((c) => c.formDate).join("، "),
+      "أرقام خارج المدة": list.filter((c) => !c.valid).map((c) => `${c.reference} (${c.validityReason})`).join("، "),
+      "حالة الصور": list
+        .map((c) => `${c.reference}: ${c.rx.status === "ready" ? "تم" : c.rx.status === "failed" ? "متعثر" : "لم يُجلب"}`)
+        .join("، "),
     };
   });
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "الموافقون على الصرف");
-  write(wb, `روشتة-برو-المتاحون-${dateKey()}.xlsx`);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "جرد الاستمارات");
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(
+      cases.map((c) => ({
+        الساب: c.sab,
+        الاسم: c.patientName,
+        "الرقم المرجعي": c.reference,
+        المصدر: SOURCE_LABEL[c.source] ?? c.source,
+        النوع: c.type || c.claimType,
+        "شهري؟": c.monthly ? "نعم" : "لا",
+        التاريخ: c.formDate,
+        "داخل المدة": c.valid ? "نعم" : "لا",
+        "سبب الاستبعاد": c.valid ? "" : c.validityReason,
+        "بها دواء": c.hasDrugs === "available" ? "نعم" : c.hasDrugs === "unavailable" ? "لا" : "",
+      })),
+    ),
+    "تفصيل كل استمارة",
+  );
+  write(wb, `روشتة-برو-جرد-الاستمارات-${dateKey()}.xlsx`);
+  return rows.length;
 }
 
-export function exportApproved(outreach: OutreachMessage[]) {
-  const rows = outreach
-    .filter((m) => m.reply === "approved")
-    .map((m) => ({
-      الاسم: m.name,
-      الساب: m.sab,
-      التليفون: m.phone,
-      "الرد": m.replyText ?? "",
-      الوقت: new Date(m.at).toLocaleString("ar-EG"),
+/** 2) إكسل الاستمارات اللي بها دواء */
+export function exportWithDrugs(cases: CaseRecord[]) {
+  const bySab = new Map<string, CaseRecord[]>();
+  for (const c of cases) {
+    if (c.hasDrugs !== "available") continue;
+    if (!bySab.has(c.sab)) bySab.set(c.sab, []);
+    bySab.get(c.sab)!.push(c);
+  }
+  const rows = [...bySab.values()].map((list) => ({
+    الاسم: list[0].patientName,
+    الساب: list[0].sab,
+    "رقم التليفون": list[0].phone,
+    "عدد الاستمارات": list.length,
+    "الأرقام المرجعية": list.map((c) => c.reference).join("، "),
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "بها دواء");
+  write(wb, `روشتة-برو-بها-دواء-${dateKey()}.xlsx`);
+  return rows.length;
+}
+
+/** 3) إكسل استمارات Pre-Approval */
+export function exportPreApproval(cases: CaseRecord[]) {
+  const rows = cases
+    .filter((c) => c.source === "pre-approval")
+    .map((c) => ({
+      الاسم: c.patientName,
+      الساب: c.sab,
+      "رقم التليفون": c.phone,
+      "الرقم المرجعي": c.reference,
+      التاريخ: c.formDate,
+      "داخل الشهر": c.valid ? "نعم" : "لا",
+    }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Pre-Approval");
+  write(wb, `روشتة-برو-PreApproval-${dateKey()}.xlsx`);
+  return rows.length;
+}
+
+/** 4) إكسل الشهري لكل ساب (مع التأكيد) */
+export function exportMonthly(monthly: MonthlyCheck[]) {
+  const rows = monthly.map((m) => ({
+    الساب: m.sab,
+    الاسم: m.patientName,
+    "رقم التليفون": m.phone,
+    "مكان العمل": m.workplace,
+    "الشهري متاح": m.confirmed === "available" ? "نعم" : m.confirmed === "unavailable" ? "لا" : m.computed === "available" ? "نعم (حسب النظام)" : "لا (حسب النظام)",
+    "آخر استمارة شهرية": m.lastMonthlyRef,
+    "تاريخ آخر شهري": m.lastMonthlyDate,
+    "مرّ عليها (يوم)": m.daysSince ?? "",
+    الملاحظة: m.reason,
+    "تأكيد المستخدم": m.confirmed ? (m.confirmed === "available" ? "متاح" : "غير متاح") : "لم يُأكد",
+  }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "الشهري");
+  write(wb, `روشتة-برو-الشهري-${dateKey()}.xlsx`);
+  return rows.length;
+}
+
+/** 5) إكسل الموافقين (الرد الإيجابي) — عمود الحساب فاضي */
+export function exportApproved(cases: CaseRecord[], outreach: OutreachMessage[]) {
+  const approvedSabs = new Set(outreach.filter((m) => m.reply === "approved").map((m) => m.sab));
+  const rows = cases
+    .filter((c) => approvedSabs.has(c.sab) && c.valid && (c.hasDrugs === "available" || c.monthly))
+    .map((c) => ({
+      الساب: c.sab,
+      الاسم: c.patientName,
+      "رقم التليفون": c.phone,
+      الاستمارة: c.reference,
+      "نوع الاستمارة": `${SOURCE_LABEL[c.source] ?? c.source}${c.monthly ? " / شهري" : ""}`,
+      الحساب: "",
     }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "الموافقون");
   write(wb, `روشتة-برو-الموافقون-${dateKey()}.xlsx`);
+  return rows.length;
+}
+
+export function exportFailed(failed: FailedRecord[], meta: Record<string, string | number>) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(
+      failed.map((f) => ({
+        الساب: f.sab,
+        الاسم: f.patientName,
+        "مكان العمل": f.workplace,
+        الخطوة: f.step,
+        "الرقم المرجعي": f.reference,
+        السبب: f.reason,
+        الوقت: new Date(f.at).toLocaleString("ar-EG"),
+      })),
+    ),
+    "متعثرات",
+  );
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([meta]), "ملخص");
+  write(wb, `روشتة-برو-متعثرات-${dateKey()}.xlsx`);
 }
 
 export function exportSessionReport(input: {
@@ -123,61 +200,54 @@ export function exportSessionReport(input: {
   sessionMs: number;
 }) {
   const wb = XLSX.utils.book_new();
-  const rows = input.cases.map((c) => ({
-    الساب: c.sab,
-    الاسم: c.patientName,
-    التليفون: c.phone,
-    "مكان العمل": c.workplace,
-    الاستمارة: c.formLabel,
-    النوع: c.formType,
-    التاريخ: c.formDate,
-    "حالة الصورة": c.rx.status === "ready" ? "جاهزة" : c.rx.status === "failed" ? "متعثرة" : "قيد الجلب",
-    "حالة الأدوية": c.drugs ?? "لم يُحدد",
-    "الشهري": c.isMonthly ? (c.monthly ?? "لم يُحدد") : "لا ينطبق",
-    "ملاحظة الشهري": c.monthlyReason,
-  }));
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "الاستمارات");
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet(
-      input.failed.map((f) => ({
-        الساب: f.sab,
-        الاسم: f.patientName,
-        الخطوة: f.step,
-        السبب: f.reason,
-        الوقت: new Date(f.at).toLocaleString("ar-EG"),
+      input.cases.map((c) => ({
+        الساب: c.sab,
+        الاسم: c.patientName,
+        "الرقم المرجعي": c.reference,
+        المصدر: SOURCE_LABEL[c.source] ?? c.source,
+        التاريخ: c.formDate,
+        "داخل المدة": c.valid ? "نعم" : "لا",
+        "حالة الصورة": c.rx.status === "ready" ? "جاهزة" : c.rx.status === "failed" ? "متعثرة" : "لم تُجلب",
+        "طريقة الالتقاط": c.rx.method ?? "",
+        "الإرجاع (Delete)": c.deleted ? "تم" : c.deleteState,
+        "بها دواء": c.hasDrugs ?? "لم يُحدد",
       })),
     ),
-    "المتعثرون",
+    "الاستمارات",
   );
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet([
       {
-        "مدة الجلسة": `${arNum(Math.round(input.sessionMs / 60000))} دقيقة`,
+        "مدة التشغيل (دقيقة)": Math.round(input.sessionMs / 60000),
         "عدد العينات": input.samples.length,
-        "أقصى نوافذ": input.samples.length ? Math.max(...input.samples.map((s) => s.workers)) : 0,
+        "أقصى عدد نوافذ": input.samples.length ? Math.max(...input.samples.map((s) => s.workers)) : 0,
       },
     ]),
     "ملخص",
   );
-  write(wb, `روشتة-برو-تقرير-الجلسة-${dateKey()}.xlsx`);
+  write(wb, `روشتة-برو-تقرير-التشغيل-${dateKey()}.xlsx`);
 }
 
-/** حفظ صورة روشتة واحدة على الجهاز */
 export function downloadImage(dataUrl: string, filename: string) {
-  if (dataUrl.startsWith("data:")) {
-    const [head, body] = dataUrl.split(",");
-    const mime = head.match(/data:([^;]+)/)?.[1] ?? "image/png";
-    const isB64 = /;base64/.test(head);
-    const bytes = isB64 ? Uint8Array.from(atob(body), (ch) => ch.charCodeAt(0)) : new TextEncoder().encode(decodeURIComponent(body));
-    downloadBlob(new Blob([bytes], { type: mime }), `${safeName(filename)}.${mime.includes("svg") ? "svg" : "png"}`);
-    return;
-  }
-  downloadBlob(new Blob([dataUrl]), `${safeName(filename)}.png`);
+  if (!dataUrl.startsWith("data:")) return;
+  const [head, body] = dataUrl.split(",");
+  const mime = head.match(/data:([^;]+)/)?.[1] ?? "image/png";
+  const isB64 = /;base64/.test(head);
+  const bytes = isB64
+    ? Uint8Array.from(atob(body), (ch) => ch.charCodeAt(0))
+    : new TextEncoder().encode(decodeURIComponent(body));
+  const ext = mime.includes("svg") ? "svg" : mime.includes("jpeg") ? "jpg" : "png";
+  downloadBlob(new Blob([bytes], { type: mime }), `${safeName(filename)}.${ext}`);
 }
 
 function write(wb: XLSX.WorkBook, filename: string) {
   const out = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  downloadBlob(new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }), filename);
+  downloadBlob(
+    new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    filename,
+  );
 }

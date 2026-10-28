@@ -1,7 +1,20 @@
 import { useEffect, useState } from "react";
-import { Activity, AlertTriangle, CheckCircle2, Download, Gauge, ListChecks, Pause, Play, Square, Timer, Zap } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  CheckCircle2,
+  Download,
+  Gauge,
+  ImageDown,
+  ListChecks,
+  Pause,
+  Play,
+  Search,
+  Square,
+  Timer,
+} from "lucide-react";
 import { useAppStore } from "../lib/store";
-import { progressOf } from "../lib/eligibility";
+import { progressSummary } from "../lib/eligibility";
 import { exportFailed } from "../lib/excel";
 import { Badge, Button, Card, EmptyState, Progress, SectionTitle, Stat } from "../components/ui";
 import { arNum, elapsedLabel, nowTime } from "../lib/utils";
@@ -22,8 +35,6 @@ export function RunScreen({
   const log = useAppStore((s) => s.log);
   const samples = useAppStore((s) => s.samples);
   const failed = useAppStore((s) => s.failed);
-  const setSettings = useAppStore((s) => s.setSettings);
-  const settings = useAppStore((s) => s.settings);
 
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
@@ -32,16 +43,19 @@ export function RunScreen({
   }, []);
 
   const list = Object.values(cases);
-  const stats = progressOf(list);
-  const running = session.state === "running" || session.state === "paused";
+  const stats = progressSummary(list);
+  const busy = session.state === "scanning" || session.state === "running" || session.state === "paused";
   const elapsed = session.startedAt ? (session.endedAt ?? now) - session.startedAt : 0;
-  const pct = stats.total ? Math.round(((stats.ready + stats.failed) / stats.total) * 100) : 0;
+
+  const total = session.phase === "images" ? session.formsTotal : session.subsTotal;
+  const done = session.phase === "images" ? session.formsDone : session.subsDone;
+  const pct = total ? Math.round((done / total) * 100) : 0;
 
   const last = samples[samples.length - 1];
   const first = samples[0];
   const span = last && first ? Math.max((last.at - first.at) / 60000, 0.1) : 0;
-  const rate = last && first ? (last.done - first.done) / span : 0;
-  const remaining = rate > 0 ? Math.max(0, (stats.total - stats.ready - stats.failed) / rate) : null;
+  const rate = last && first ? (last.forms - first.forms) / span : 0;
+  const remainingMin = rate > 0 ? Math.max(0, (session.formsTotal - session.formsDone) / rate) : null;
 
   return (
     <div className="space-y-4">
@@ -49,26 +63,29 @@ export function RunScreen({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="rounded-xl bg-teal-500/15 p-2.5">
-              <Activity className={running ? "h-5 w-5 animate-pulse text-teal-300" : "h-5 w-5 text-white/40"} />
+              <Activity className={busy ? "h-5 w-5 animate-pulse text-teal-300" : "h-5 w-5 text-white/40"} />
             </div>
             <div>
               <div className="text-sm font-bold text-white">
-                {session.state === "running"
-                  ? "الجلسة شغّالة"
-                  : session.state === "paused"
-                    ? "الجلسة متوقفة مؤقتًا"
-                    : session.state === "done"
-                      ? "الجلسة انتهت"
-                      : "لسه مفيش جلسة"}
+                {session.state === "scanning"
+                  ? "المرحلة ١: جرد الاستمارات من نايس دير"
+                  : session.state === "running"
+                    ? "المرحلة ٢: جلب صور الروشتات"
+                    : session.state === "paused"
+                      ? "متوقف مؤقتًا"
+                      : session.state === "done"
+                        ? "التشغيل انتهى"
+                        : "مفيش تشغيل"}
               </div>
               <div className="text-xs text-white/45">
-                {session.startedAt ? `بدأت ${nowTime(session.startedAt)}` : "ابدأ من شاشة الإعداد"}
+                {session.startedAt ? `بدأ ${nowTime(session.startedAt)}` : "ابدأ من شاشة الإعداد"}
+                {session.workers ? ` • ${session.workers} نوافذ` : ""}
               </div>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {session.state === "running" ? (
+            {session.state === "running" || session.state === "scanning" ? (
               <Button variant="ghost" onClick={onPause}>
                 <Pause className="h-4 w-4" /> إيقاف مؤقت
               </Button>
@@ -78,7 +95,7 @@ export function RunScreen({
                 <Play className="h-4 w-4" /> استكمال
               </Button>
             ) : null}
-            {running ? (
+            {busy ? (
               <Button variant="danger" onClick={onStop}>
                 <Square className="h-4 w-4" /> إيقاف
               </Button>
@@ -92,7 +109,15 @@ export function RunScreen({
         <div className="mt-4 space-y-2">
           <div className="flex items-center justify-between text-xs text-white/50">
             <span>
-              {stats.ready + stats.failed} / {stats.total} استمارة
+              {session.phase === "images" ? (
+                <>
+                  <ImageDown className="ml-1 inline h-3 w-3" /> {done} / {total} استمارة
+                </>
+              ) : (
+                <>
+                  <Search className="ml-1 inline h-3 w-3" /> {done} / {total} ساب
+                </>
+              )}
             </span>
             <span>{pct}%</span>
           </div>
@@ -100,68 +125,51 @@ export function RunScreen({
         </div>
 
         <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-6">
-          <Stat label="وقت الجلسة" value={<span className="inline-flex items-center gap-1"><Timer className="h-4 w-4" />{elapsedLabel(elapsed)}</span>} />
-          <Stat label="المتبقي المتوقع" value={remaining !== null ? `${arNum(Math.ceil(remaining))} د` : "—"} />
-          <Stat label="السرعة" value={`${arNum(rate)} /د`} tone="ok" />
+          <Stat
+            label="وقت التشغيل"
+            value={
+              <span className="inline-flex items-center gap-1">
+                <Timer className="h-4 w-4" />
+                {elapsedLabel(elapsed)}
+              </span>
+            }
+          />
+          <Stat label="المتبقي المتوقع" value={remainingMin !== null ? `${arNum(Math.ceil(remainingMin))} د` : "—"} />
+          <Stat label="صور/دقيقة" value={arNum(rate)} tone="ok" />
           <Stat label="صور جاهزة" value={stats.ready} tone="ok" />
-          <Stat label="قيد الجلب" value={stats.loading} tone="warn" />
-          <Stat label="متعثرة" value={stats.failed} tone="bad" />
+          <Stat label="داخل المدة" value={stats.valid} />
+          <Stat label="متعثرة" value={session.failures || stats.failed} tone="bad" />
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="mt-3 flex flex-wrap gap-1.5">
           <Badge tone="info">
-            <Gauge className="h-3 w-3" /> {session.workers} نوافذ {session.autoWorkers ? "(تلقائي)" : ""}
+            <Gauge className="h-3 w-3" /> {session.workers} نوافذ متوازية
           </Badge>
-          <Badge tone={session.fastMode ? "ok" : "neutral"}>
-            <Zap className="h-3 w-3" /> {session.fastMode ? "الوضع السريع" : "الوضع الآمن"}
-          </Badge>
-          <Badge tone={settings.preventDelete ? "ok" : "neutral"}>
-            {settings.preventDelete ? "منع الإرجاع مفعّل" : "الإرجاع مسموح"}
-          </Badge>
-          <button
-            onClick={() => setSettings({ fastMode: !settings.fastMode })}
-            className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-white/60 hover:bg-white/5"
-          >
-            تبديل السرعة
-          </button>
-          <button
-            onClick={() => setSettings({ preventDelete: !settings.preventDelete })}
-            className="rounded-lg border border-white/10 px-2.5 py-1 text-xs text-white/60 hover:bg-white/5"
-          >
-            تبديل منع الإرجاع
-          </button>
+          <Badge tone={stats.withDrugs ? "ok" : "neutral"}>بها دواء: {stats.withDrugs}</Badge>
+          <Badge tone="neutral">بدون دواء: {stats.withoutDrugs}</Badge>
+          <Badge tone="warn">خارج المدة: {stats.invalid}</Badge>
         </div>
-
-        {session.decisions.length ? (
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {session.decisions.slice(0, 4).map((d, i) => (
-              <Badge key={i} tone="neutral">
-                {d}
-              </Badge>
-            ))}
-          </div>
-        ) : null}
       </Card>
 
       {stats.failed > 0 ? (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/25 bg-amber-500/10 px-4 py-3">
           <div className="flex items-center gap-2 text-sm text-amber-200">
             <AlertTriangle className="h-4 w-4" />
-            {stats.failed} استمارة متعثرة (اتخطّت والجلسة كملت) — التفاصيل في القرار أو الإكسل.
+            {stats.failed} استمارة متعثرة — اتخطّت والجلسة كملت، وتقدر تعيدها من شاشة القرار.
           </div>
           <Button
             size="sm"
             variant="ghost"
             onClick={() =>
               exportFailed(failed, {
-                "مدة الجلسة": elapsedLabel(elapsed),
+                "مدة التشغيل": elapsedLabel(elapsed),
                 "عدد الاستمارات": stats.total,
-                "الصور الجاهزة": stats.ready,
-                "المتعثرة": stats.failed,
+                "صور جاهزة": stats.ready,
+                "متعثرة": stats.failed,
               })
             }
           >
-            <Download className="h-3.5 w-3.5" /> تصدير إكسل المتعثرين
+            <Download className="h-3.5 w-3.5" /> إكسل المتعثرين
           </Button>
         </div>
       ) : null}
@@ -169,13 +177,13 @@ export function RunScreen({
       <div className="grid gap-3 lg:grid-cols-2">
         <Card className="p-0">
           <div className="border-b border-white/10 px-4 py-3">
-            <SectionTitle hint={`${log.length} سطر`}>سجل التشغيل</SectionTitle>
+            <SectionTitle hint={`${log.length} سطر`}>سجل التشغيل الحقيقي</SectionTitle>
           </div>
-          <div className="max-h-72 space-y-1 overflow-auto p-3 font-mono text-[11px]" dir="rtl">
+          <div className="max-h-80 space-y-1 overflow-auto p-3 font-mono text-[11px]" dir="rtl">
             {log.length === 0 ? (
               <div className="py-6 text-center text-white/35">لسه مفيش أحداث</div>
             ) : (
-              log.slice(0, 200).map((l) => (
+              log.slice(0, 250).map((l) => (
                 <div key={l.id} className="flex gap-2">
                   <span className="shrink-0 text-white/25">{nowTime(l.at)}</span>
                   <span
@@ -199,13 +207,13 @@ export function RunScreen({
 
         <Card className="p-0">
           <div className="border-b border-white/10 px-4 py-3">
-            <SectionTitle hint={`${failed.length} سطر`}>السابات المتعثرة</SectionTitle>
+            <SectionTitle hint={`${failed.length} سطر`}>المتعثرات</SectionTitle>
           </div>
-          <div className="max-h-72 overflow-auto">
+          <div className="max-h-80 overflow-auto">
             {failed.length === 0 ? (
               <div className="flex flex-col items-center gap-1 py-10 text-center">
                 <CheckCircle2 className="h-6 w-6 text-emerald-400" />
-                <span className="text-xs text-white/45">مفيش تعثرات — كل حاجة رجعت</span>
+                <span className="text-xs text-white/45">مفيش تعثرات</span>
               </div>
             ) : (
               <table className="w-full text-right text-[11px]">
@@ -213,6 +221,7 @@ export function RunScreen({
                   <tr>
                     <th className="px-3 py-2 font-medium">الساب</th>
                     <th className="px-3 py-2 font-medium">الخطوة</th>
+                    <th className="px-3 py-2 font-medium">المرجع</th>
                     <th className="px-3 py-2 font-medium">السبب</th>
                   </tr>
                 </thead>
@@ -221,6 +230,7 @@ export function RunScreen({
                     <tr key={f.id} className="border-t border-white/5">
                       <td className="px-3 py-1.5 tabular-nums text-white/80">{f.sab}</td>
                       <td className="px-3 py-1.5 text-amber-300">{f.step}</td>
+                      <td className="px-3 py-1.5 tabular-nums text-white/60">{f.reference || "—"}</td>
                       <td className="px-3 py-1.5 text-white/50">{f.reason}</td>
                     </tr>
                   ))}
@@ -232,7 +242,10 @@ export function RunScreen({
       </div>
 
       {!list.length ? (
-        <EmptyState title="مفيش استمارات في الجلسة" body="ارجع لشاشة الإعداد وارفع ملف Excel أو حمّل البيانات التجريبية." />
+        <EmptyState
+          title="مفيش جرد لسه"
+          body="ارجع للإعداد، اختار الباير وارفع ملف السابات، واضغط «جرد الاستمارات» — الجرد بيقرأ الجدولين من نايس دير فعليًا."
+        />
       ) : null}
     </div>
   );

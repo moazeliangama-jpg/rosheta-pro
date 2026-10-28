@@ -5,67 +5,97 @@ import { hasDesktopBridge } from "../lib/provider";
 import { Badge, Card, SectionTitle } from "./ui";
 
 /**
- * لوحة تشخيص «الروشتة مش بتظهر» — بتقول للمستخدم سبب واحد واضح بدل ما يفضل يدوّر.
- * كل بند ليه حالة نجاح/تحذير/فشل وطريقة إصلاح مكتوبة.
+ * لوحة تشخيص حقيقية: بتقول سبب عدم ظهور الروشتة بالضبط،
+ * من غير أي تخمين — بتقرأ حالة الجسر والحالة المحفوظة.
  */
 export function DiagnosticsPanel() {
   const cases = useAppStore((s) => s.cases);
   const settings = useAppStore((s) => s.settings);
   const imagesHydrated = useAppStore((s) => s.imagesHydrated);
+  const loggedIn = useAppStore((s) => s.niceDeerLoggedIn);
+  const session = useAppStore((s) => s.session);
 
   const checks = useMemo(() => {
     const list = Object.values(cases);
-    const withImage = list.filter((c) => c.rx.status === "ready" && c.rx.dataUrl).length;
-    const failed = list.filter((c) => c.rx.status === "failed").length;
-    const stale = list.filter((c) => c.rx.status === "ready" && !c.rx.dataUrl).length;
+    const ready = list.filter((c) => c.rx.status === "ready" && c.rx.dataUrl);
+    const failed = list.filter((c) => c.rx.status === "failed");
+    const stale = list.filter((c) => c.rx.status === "ready" && !c.rx.dataUrl);
+    const methods = [...new Set(ready.map((c) => c.rx.method).filter(Boolean))];
 
     return [
       {
         key: "bridge",
-        level: hasDesktopBridge() ? "ok" : "warn",
-        title: "جسر نايس دير",
+        level: hasDesktopBridge() ? "ok" : "bad",
+        title: "محرك سطح المكتب",
         detail: hasDesktopBridge()
-          ? "متصل بنسخة سطح المكتب — النوافذ المخفية جاهزة."
-          : "شغّال في المتصفح: نايس دير محتاج نسخة سطح المكتب. الوضع التجريبي بيغطي الاختبار.",
+          ? "متصل — نوافذ نايس دير الحقيقية جاهزة للفتح والتقاط الصور."
+          : "غير متاح: أتمتة نايس دير لازم تشتغل من نسخة سطح المكتب (EXE). المتصفح مش قادر يفتح نوافذ مخفية.",
       },
       {
-        key: "mode",
-        level: settings.demoMode ? "info" : "ok",
-        title: "مصدر الصور",
-        detail: settings.demoMode ? "الوضع التجريبي — صور روشتات تجريبية بدل السيستم." : "بيجلب من نايس دير فعليًا.",
+        key: "login",
+        level: loggedIn ? "ok" : "warn",
+        title: "تسجيل دخول نايس دير",
+        detail: loggedIn
+          ? "الجلسة مسجلة — البرنامج بيدخل تلقائيًا."
+          : "لسه مش متأكد من الدخول. اضغط «اختبار الدخول» في الإعداد.",
+      },
+      {
+        key: "payer",
+        level: settings.payerId ? "ok" : "bad",
+        title: "الباير",
+        detail: settings.payerId
+          ? `المختار: ${settings.payerName} (#${settings.payerId})`
+          : "لازم تختار الباير — من غيره البحث مش هيجيب استمارات.",
       },
       {
         key: "storage",
         level: imagesHydrated ? "ok" : "warn",
-        title: "مخزن الصور المحلي",
+        title: "مخزن صور الروشتات",
         detail: imagesHydrated
-          ? "IndexedDB شغّال — الصور بتفضل موجودة بعد قفل البرنامج."
-          : "لسه بيسترجع الصور… لو فضل كده، الصور اتمسحت من تخزين المتصفح.",
+          ? "IndexedDB شغّال — الصور بتفضل بعد قفل البرنامج."
+          : "بيسترجع الصور… لو فضل كده، التخزين المحلي ممسوح.",
       },
       {
         key: "stale",
-        level: stale > 0 ? "bad" : "ok",
-        title: "استمارات بحالة «جاهزة» بدون صورة",
+        level: stale.length > 0 ? "bad" : "ok",
+        title: "استمارات «جاهزة» بدون صورة",
         detail:
-          stale > 0
-            ? `${stale} استمارة محتاجة إعادة جلب — هتظهر برسالة واضحة في شاشة القرار بدل مربع فاضي.`
+          stale.length > 0
+            ? `${stale.length} استمارة محتاجة إعادة جلب — هتظهر بعلامة حمراء وسببها.`
             : "مفيش تعارض بين الحالة والصورة.",
       },
       {
         key: "images",
-        level: list.length === 0 ? "info" : failed > 0 ? "warn" : "ok",
+        level: list.length === 0 ? "info" : failed.length > 0 ? "warn" : "ok",
         title: "حصيلة الصور",
         detail:
           list.length === 0
-            ? "لسه مفيش استمارات محمّلة."
-            : `${withImage} صورة جاهزة، ${failed} غير متاحة، ${list.length - withImage - failed} قيد الجلب.`,
+            ? "لسه مفيش جرد. ابدأ «جرد الاستمارات»."
+            : `${ready.length} صورة جاهزة، ${failed.length} فاشلة، ${list.length - ready.length - failed.length} لم تُجلب بعد.` +
+              (methods.length ? ` طرق الالتقاط: ${methods.join(" / ")}` : ""),
+      },
+      {
+        key: "delete",
+        level: settings.preventDelete ? "warn" : "info",
+        title: "الإرجاع (Delete)",
+        detail: settings.preventDelete
+          ? "متوقف — البرنامج مش هيضغط Delete، فاﻻستمارة هتفضل على السيستم."
+          : "شغّال — بعد التقاط صورة كل استمارة البرنامج بيضغط #btn-DeleteClaim لإرجاعها زي طريقة الصرف.",
+      },
+      {
+        key: "session",
+        level: session.state === "done" ? "ok" : "info",
+        title: "آخر تشغيل",
+        detail: session.startedAt
+          ? `الحالة: ${session.state} — صور: ${session.images}، متعثرات: ${session.failures}.`
+          : "لسه مفيش تشغيل.",
       },
     ] as const;
-  }, [cases, settings, imagesHydrated]);
+  }, [cases, settings, imagesHydrated, loggedIn, session]);
 
   return (
     <Card>
-      <SectionTitle hint="بتتحدث تلقائيًا">تشخيص عرض الروشتات</SectionTitle>
+      <SectionTitle hint="بيتحدث تلقائيًا">تشخيص عرض الروشتات</SectionTitle>
       <div className="space-y-2">
         {checks.map((c) => {
           const Icon = c.level === "ok" ? CheckCircle2 : c.level === "bad" ? XCircle : c.level === "warn" ? ShieldAlert : Info;
@@ -87,7 +117,9 @@ export function DiagnosticsPanel() {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-sm font-medium text-white">{c.title}</span>
-                  <Badge tone={tone}>{c.level === "ok" ? "سليم" : c.level === "bad" ? "مشكلة" : c.level === "warn" ? "انتبه" : "معلومة"}</Badge>
+                  <Badge tone={tone}>
+                    {c.level === "ok" ? "سليم" : c.level === "bad" ? "مشكلة" : c.level === "warn" ? "انتبه" : "معلومة"}
+                  </Badge>
                 </div>
                 <p className="mt-0.5 text-xs leading-relaxed text-white/50">{c.detail}</p>
               </div>

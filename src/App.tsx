@@ -1,14 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Activity, ClipboardList, FlaskConical, ListChecks, Settings2 } from "lucide-react";
+import { Activity, ClipboardList, FlaskConical, ListChecks, Settings2, ShieldOff } from "lucide-react";
 import { useAppStore } from "./lib/store";
-import { SessionEngine, buildCases, repairMissingImages } from "./lib/engine";
+import { SessionEngine, refreshValidity, repairMissingImages } from "./lib/engine";
+import { hasDesktopBridge, bridge } from "./lib/provider";
 import { SetupScreen } from "./screens/SetupScreen";
 import { RunScreen } from "./screens/RunScreen";
 import { DecisionScreen } from "./screens/DecisionScreen";
 import { ResultsScreen } from "./screens/ResultsScreen";
-import { Badge } from "./components/ui";
-import type { CaseRecord } from "./lib/types";
+import { Badge, Button, Card } from "./components/ui";
+import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { exportApproved } from "./lib/excel";
 import { dateKey, cn } from "./lib/utils";
+import type { CaseRecord } from "./lib/types";
 
 const TABS = [
   { key: "setup", label: "الإعداد", icon: Settings2 },
@@ -26,108 +29,161 @@ export default function App() {
   const outreach = useAppStore((s) => s.outreach);
   const logLine = useAppStore((s) => s.logLine);
   const hydrateImages = useAppStore((s) => s.hydrateImages);
+  const setLoggedIn = useAppStore((s) => s.setLoggedIn);
 
   const [, setTick] = useState(0);
   const [engine, setEngine] = useState<SessionEngine | null>(null);
   const autoRef = useRef(false);
+  const bridges = hasDesktopBridge();
 
-  // استرجاع الصور + تنقية الحالات المعلّقة عند فتح البرنامج
+  const onTick = () => setTick((t) => t + 1);
+
+  // استرجاع الصور + تنقية الحالات + تحديث الصلاحية حسب تاريخ اليوم
   useEffect(() => {
     void hydrateImages();
     const t = setTimeout(() => {
-      const fixed = repairMissingImages();
-      if (fixed) logLine("warn", `تم رصد ${fixed} روشتة بحالة غير متسقة وتم تعليمها لإعادة الجلب.`);
-    }, 900);
+      repairMissingImages();
+      refreshValidity();
+    }, 800);
+    const b = bridge();
+    if (b) void b.status().then((res) => setLoggedIn(Boolean(res?.loggedIn)));
     return () => clearTimeout(t);
-  }, [hydrateImages, logLine]);
+  }, [hydrateImages, setLoggedIn]);
 
-  // الجلسة التلقائية اليومية
+  // التشغيل التلقائي اليومي + تصدير إكسل الموافقين
   useEffect(() => {
     if (autoRef.current) return;
     autoRef.current = true;
     const t = setInterval(() => {
       const s = useAppStore.getState();
-      const [h, m] = s.settings.sessionTime.split(":").map(Number);
       const now = new Date();
-      const due = now.getHours() === h && now.getMinutes() === m;
-      const alreadyToday = s.settings.lastAutoSessionDate === dateKey(now);
-      const missedToday = s.settings.lastAutoSessionDate !== dateKey(now) && now.getHours() >= h;
-      const hasWork = Object.values(s.cases).some((c) => c.rx.status !== "ready");
-      if ((due || (missedToday && now.getMinutes() < 5)) && !alreadyToday && hasWork && s.session.state !== "running") {
-        s.setSettings({ lastAutoSessionDate: dateKey(now) });
-        s.setScreen("run");
-        startEngine(true);
+      const [sh, sm] = s.settings.sessionTime.split(":").map(Number);
+      const [rh, rm] = s.settings.reportTime.split(":").map(Number);
+      const today = dateKey(now);
+
+      const scanDue = now.getHours() === sh && now.getMinutes() === sm;
+      if (scanDue && s.settings.lastAutoSessionDate !== today && s.patients.length && s.session.state === "idle") {
+        s.setSettings({ lastAutoSessionDate: today });
+        s.logLine("info", "التشغيل التلقائي اليومي بدأ.");
+        startEngine({ fresh: true, scan: true, images: true });
+      }
+
+      const reportDue = now.getHours() === rh && now.getMinutes() === rm;
+      if (reportDue && s.settings.lastReportDate !== today && s.outreach.length) {
+        const all = Object.values(s.cases);
+        const count = exportApproved(all, s.outreach);
+        s.setSettings({ lastReportDate: today });
+        s.logLine("ok", `تم تصدير إكسل الموافقين اليومي (${count} صف).`);
       }
     }, 30000);
     return () => clearInterval(t);
   }, []);
 
-  const onTick = () => setTick((t) => t + 1);
-
-  const startEngine = (fresh: boolean) => {
-    const st = useAppStore.getState();
-    st.setScreen("run");
-    let list = Object.values(st.cases);
-    const sheetPatients = st.patients;
-    const sheetForms = st.forms;
-    if (!list.length && sheetPatients.length && sheetForms.length) {
-      for (const c of buildCases(sheetPatients, sheetForms, st.settings.monthlyCooldownDays)) st.upsertCase(c);
-      list = Object.values(useAppStore.getState().cases);
-    }
-    if (!list.length) {
-      logLine("warn", "مفيش استمارات للتشغيل — ارفع Excel أو حمّل بيانات تجريبية.");
+  const startEngine = (opts: { fresh: boolean; scan: boolean; images: boolean }) => {
+    if (!bridges) {
+      logLine("error", "الأتمتة الحقيقية تحتاج نسخة سطح المكتب — شغّل الـ EXE.");
       return;
     }
-    const sessionSettings = useAppStore.getState().settings;
-    const merged = list.map((c) => ({ ...c, workplace: c.workplace || sessionSettings.workplace }));
-
+    const st = useAppStore.getState();
+    const list = st.patients.filter((p) => !st.settings.workplace || (p.workplace || "بدون مكان عمل") === st.settings.workplace);
+    if (!list.length) {
+      logLine("error", "مفيش سابات في مكان العمل المختار.");
+      return;
+    }
+    if (!st.settings.payerId) {
+      logLine("error", "اختر الباير الأول.");
+      return;
+    }
+    st.setScreen("run");
     const eng = new SessionEngine(onTick);
     setEngine(eng);
-    logLine("info", fresh ? "بدء تشغيل كامل جديد." : "استكمال الجلسة.");
-    void eng.start(merged, { fresh }).catch((err) => {
+    void eng.start(list, opts).catch((err) => {
       logLine("error", `خطأ في المحرك: ${err instanceof Error ? err.message : String(err)}`);
     });
   };
 
   const retryOne = async (c: CaseRecord) => {
-    // إعادة محاولة منفردة: تستخدم نفس مسار المحرك بالظبط عشان النتيجة تتحفظ بنفس المفتاح
-    const eng = engine ?? new SessionEngine(onTick);
-    if (!engine) setEngine(eng);
+    // محرك مستقل لكل إعادة جلب — ما بيوقفش الجلسة الشغّالة
+    const eng = new SessionEngine(onTick);
     useAppStore.getState().setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
     try {
-      await eng.retryOne(c);
-      const after = useAppStore.getState().cases[c.id];
-      if (after?.rx.status === "ready") logLine("ok", `تم إصلاح صورة ${c.patientName}.`);
+      await eng.retryImage(c);
     } catch (err) {
       useAppStore.getState().setRxStatus(c.id, {
         status: "failed",
         attempts: 3,
-        reason: err instanceof Error ? err.message : "فشل إعادة المحاولة",
+        reason: err instanceof Error ? err.message : "فشل إعادة الجلب",
         updatedAt: Date.now(),
       });
     }
   };
 
-  const badges: Record<string, number> = {
-    decision: Object.values(cases).filter((c) => c.rx.status === "failed").length,
-    results: outreach.filter((m) => m.status === "queued").length,
+  const rescanSab = async (sab: string) => {
+    const st = useAppStore.getState();
+    const patient = st.patients.find((p) => p.sab === sab);
+    if (!patient) return;
+    await new SessionEngine(onTick).rescanSab(patient);
   };
 
-  const decisionReady = Object.values(cases).some((c) => c.drugs !== null || c.monthly !== null);
+  const badges: Record<string, number> = {
+    decision: Object.values(cases).filter((c) => c.rx.status === "failed").length,
+    results: outreach.filter((m) => m.status === "queued" || m.status === "failed").length,
+  };
+
+  if (!bridges) {
+    return (
+      <div className="min-h-screen bg-[#05090a] text-white" dir="rtl">
+        <div className="mx-auto max-w-3xl px-4 py-10">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-teal-500/15 text-teal-300">
+              <FlaskConical className="h-6 w-6" />
+            </div>
+            <div>
+              <h1 className="text-xl font-extrabold">روشتة برو</h1>
+              <p className="text-xs text-white/45">أتمتة نايس دير الحقيقية — نسخة سطح المكتب</p>
+            </div>
+          </div>
+
+          <Card className="border-rose-500/30 bg-rose-950/20">
+            <div className="flex items-start gap-3">
+              <ShieldOff className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
+              <div className="space-y-2 text-sm">
+                <div className="font-bold text-rose-200">البرنامج لازم يشتغل من نسخة سطح المكتب</div>
+                <p className="text-xs leading-relaxed text-rose-100/70">
+                  قراءة الجدولين، فتح نافذة الروشتة، التقاط صورتها، والضغط على Delete — كلها عمليات على نوافذ
+                  نايس دير الحقيقية، والمتصفح مش بيسمح بيها. شغّل الـ EXE وكل حاجة هتشتغل فعليًا.
+                </p>
+                <pre className="overflow-auto rounded-lg bg-black/50 p-3 text-[11px] text-emerald-200" dir="ltr">
+{`npm install
+npm run build
+npx electron .      # للتشغيل مباشرة
+build-exe.bat       # لتوليد مثبّت ويندوز`}
+                </pre>
+              </div>
+            </div>
+          </Card>
+
+          <div className="mt-4">
+            <DiagnosticsPanel />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#05090a] text-white" dir="rtl">
       <div className="pointer-events-none fixed inset-0 opacity-60 [background:radial-gradient(900px_400px_at_80%_-10%,rgba(13,148,136,0.18),transparent),radial-gradient(700px_300px_at_10%_110%,rgba(16,185,129,0.12),transparent)]" />
 
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[#05090a]/85 backdrop-blur">
-        <div className="mx-auto flex max-w-[1400px] flex-wrap items-center justify-between gap-3 px-4 py-3">
+        <div className="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-3 px-4 py-3">
           <div className="flex items-center gap-2.5">
             <div className="grid h-9 w-9 place-items-center rounded-xl bg-teal-500/15 text-teal-300">
               <FlaskConical className="h-5 w-5" />
             </div>
             <div>
               <div className="text-sm font-extrabold leading-tight">روشتة برو</div>
-              <div className="text-[10px] text-white/40">نظام تحليل الاستمارات والمتابعة</div>
+              <div className="text-[10px] text-white/40">تسجيل دخول · جرد · صور الروشتات · واتساب</div>
             </div>
           </div>
 
@@ -148,7 +204,7 @@ export default function App() {
                   <Icon className="h-3.5 w-3.5" />
                   {t.label}
                   {count > 0 ? (
-                    <span className="rounded-md bg-rose-500/80 px-1 text-[10px] text-white tabular-nums">{count}</span>
+                    <span className="rounded-md bg-rose-500/80 px-1 text-[10px] tabular-nums text-white">{count}</span>
                   ) : null}
                 </button>
               );
@@ -156,14 +212,20 @@ export default function App() {
           </nav>
 
           <div className="flex items-center gap-2">
-            {settings.demoMode ? <Badge tone="info">وضع تجريبي</Badge> : null}
-            {session.state === "running" ? <Badge tone="ok">جلسة شغّالة</Badge> : null}
+            <Badge tone="ok">سطح المكتب</Badge>
+            {settings.payerName ? <Badge tone="info">{settings.payerName}</Badge> : <Badge tone="bad">الباير غير محدد</Badge>}
+            {session.state === "scanning" || session.state === "running" ? <Badge tone="ok">تشغيل جارٍ</Badge> : null}
           </div>
         </div>
       </header>
 
-      <main className="relative mx-auto max-w-[1400px] px-4 py-4">
-        {screen === "setup" ? <SetupScreen onStart={() => startEngine(true)} /> : null}
+      <main className="relative mx-auto max-w-[1500px] px-4 py-4">
+        {screen === "setup" ? (
+          <SetupScreen
+            onScan={() => startEngine({ fresh: true, scan: true, images: false })}
+            onImages={() => startEngine({ fresh: false, scan: false, images: true })}
+          />
+        ) : null}
         {screen === "run" ? (
           <RunScreen
             onPause={() => engine?.pause()}
@@ -172,18 +234,19 @@ export default function App() {
             onDecision={() => setScreen("decision")}
           />
         ) : null}
-        {screen === "decision" ? <DecisionScreen onRetry={retryOne} /> : null}
-        {screen === "results" ? <ResultsScreen onSend={() => setScreen("results")} /> : null}
+        {screen === "decision" ? <DecisionScreen onRetry={retryOne} onRescanSab={rescanSab} /> : null}
+        {screen === "results" ? <ResultsScreen /> : null}
       </main>
 
-      {session.state === "done" && screen !== "decision" && decisionReady ? (
+      {session.state === "done" && screen !== "decision" ? (
         <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2">
-          <button
+          <Button
+            size="lg"
             onClick={() => setScreen("decision")}
-            className="rounded-full border border-teal-400/40 bg-teal-500/20 px-5 py-2.5 text-sm font-semibold text-teal-100 shadow-xl backdrop-blur hover:bg-teal-500/30"
+            className="rounded-full shadow-xl"
           >
-            الجلسة انتهت — افتح شاشة القرار ({Object.values(cases).filter((c) => c.rx.status === "ready").length} صورة جاهزة)
-          </button>
+            التشغيل انتهى — افتح شاشة القرار ({Object.values(cases).filter((c) => c.rx.status === "ready").length} صورة جاهزة)
+          </Button>
         </div>
       ) : null}
     </div>

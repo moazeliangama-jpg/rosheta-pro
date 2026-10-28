@@ -1,0 +1,28 @@
+import type { Settings } from "./types";
+
+/** الإعدادات الافتراضية — كل القيم حقيقية وبتتنفذ على نايس دير/واتساب */
+export const defaultSettings: Settings = {
+  workplace: "",
+  payerId: "",
+  payerName: "",
+  niceDeerUser: "",
+  niceDeerPass: "",
+  receptionNumbers: "",
+  sessionTime: "08:30",
+  reportTime: "20:00",
+  workerChoice: "auto",
+  validityDays: 6,
+  preventDelete: false,
+  includeInvalid: false,
+  messageDrugs:
+    "أهلاً {name}، استمارتك بها أدوية متاحة للصرف. برجاء تأكيد الموافقة على الصرف من خلال نفس الرقم.",
+  messageMonthly:
+    "أهلاً {name}، الشهري متاح لحضرتك هذا الشهر. برجاء تأكيد الموافقة على الصرف من خلال نفس الرقم.",
+  replyPositive: "موافق,تم,أوافق,ايوه,أيوه,نعم,تمام,ok,yes,agree",
+  replyNegative: "رافض,لا,مش موافق,مرفوض,no,reject",
+  replyPostpone: "تأجيل,أجل,بعدين,لاحقا,لاحقاً,استنى,wait,later,postpone",
+  sendDelaySec: 8,
+  lastReportDate: "",
+  lastAutoSessionDate: "",
+  lastScanAt: 0,
+};

@@ -3,8 +3,8 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import type {
   CaseRecord,
   FailedRecord,
-  FormRow,
   LogEntry,
+  MonthlyCheck,
   OutreachMessage,
   PatientRow,
   RxImage,
@@ -15,57 +15,41 @@ import type {
 } from "./types";
 import { loadImage, saveImage } from "./imageStore";
 import { dateKey, uid } from "./utils";
+import { defaultSettings } from "./settings";
+
+export { defaultSettings };
 
 export type Screen = "setup" | "run" | "decision" | "results";
 
-export const defaultSettings: Settings = {
-  workplace: "",
-  buyer: "",
-  niceDeerUser: "",
-  niceDeerPass: "",
-  whatsappSender: "",
-  whatsappConnected: false,
-  receptionNumbers: "",
-  sessionTime: "08:30",
-  reportTime: "20:00",
-  workerChoice: "auto",
-  fastMode: true,
-  preventDelete: false,
-  demoMode: true,
-  messageTemplate:
-    "أهلاً {name}، روشتتك الشهرية جاهزة للصرف من مكان العمل. برجاء تأكيد الموافقة على الصرف.",
-  sendDelaySec: 6,
-  lastReportDate: "",
-  lastAutoSessionDate: "",
-  monthlyCooldownDays: 6,
-};
 
-const emptySession: SessionMeta = {
+
+export const emptySession: SessionMeta = {
   state: "idle",
+  phase: "idle",
   startedAt: null,
   endedAt: null,
   subsTotal: 0,
   subsDone: 0,
-  rxTotal: 0,
-  rxReady: 0,
+  formsTotal: 0,
+  formsDone: 0,
+  images: 0,
   failures: 0,
-  workers: 4,
+  workers: 5,
   autoWorkers: true,
-  fastMode: true,
-  currentBest: null,
   decisions: [],
   lastTuneAt: 0,
 };
 
-/** دمج صورتين لنفس الاستمارة بدون ما نضيّع صورة سليمة وصلت قبل كده */
+/** يحافظ على صورة موجودة قوية لو التحديث الجديد جاي من غير صورة */
 export function mergeRx(prev: RxImage | undefined, next: RxImage): RxImage {
   if (!prev) return next;
-  if (next.dataUrl) return next;
-  if (next.status === "ready" && !next.dataUrl && prev.dataUrl) {
-    return { ...next, dataUrl: prev.dataUrl };
+  if (next.dataUrl) return { ...next, status: "ready" };
+  if (prev.dataUrl && (next.status === "loading" || next.status === "pending" || next.status === "ready")) {
+    return { ...next, status: "ready", dataUrl: prev.dataUrl };
   }
-  if (prev.dataUrl && next.status !== "failed") {
-    return { ...next, dataUrl: prev.dataUrl, status: "ready" };
+  if (prev.dataUrl && next.status === "failed") {
+    // فشل إعادة محاولة مش لازم يمسح صورة شغالة موجودة بالفعل
+    return { ...prev, reason: next.reason, updatedAt: next.updatedAt };
   }
   return next;
 }
@@ -76,9 +60,7 @@ export function mergeCase(prev: CaseRecord | undefined, next: CaseRecord): CaseR
     ...prev,
     ...next,
     rx: mergeRx(prev.rx, next.rx),
-    // قرارات المستخدم لا تُمس من تحديثات المحرك
-    drugs: next.drugs ?? prev.drugs,
-    monthly: next.monthly ?? prev.monthly,
+    hasDrugs: next.hasDrugs ?? prev.hasDrugs,
     updatedAt: Date.now(),
   };
 }
@@ -86,9 +68,9 @@ export function mergeCase(prev: CaseRecord | undefined, next: CaseRecord): CaseR
 interface AppState {
   settings: Settings;
   patients: PatientRow[];
-  forms: FormRow[];
   cases: Record<string, CaseRecord>;
   caseOrder: string[];
+  monthly: Record<string, MonthlyCheck>;
   failed: FailedRecord[];
   log: LogEntry[];
   session: SessionMeta;
@@ -97,18 +79,22 @@ interface AppState {
   screen: Screen;
   viewerId: string | null;
   imagesHydrated: boolean;
+  niceDeerLoggedIn: boolean;
 
   setSettings: (patch: Partial<Settings>) => void;
-  loadSheet: (patients: PatientRow[], forms: FormRow[]) => void;
+  loadPatients: (patients: PatientRow[]) => void;
+  resetRun: () => void;
   upsertCase: (record: CaseRecord) => void;
   patchCase: (id: string, patch: Partial<CaseRecord>) => void;
   setRxStatus: (id: string, rx: RxImage) => void;
-  setImage: (id: string, dataUrl: string) => void;
-  setVerdict: (id: string, kind: "drugs" | "monthly", value: Verdict) => void;
-  resetDecisions: () => void;
+  setImage: (id: string, dataUrl: string, method?: string) => void;
+  setHasDrugs: (id: string, value: Verdict) => void;
+  upsertMonthly: (checks: MonthlyCheck[]) => void;
+  setMonthlyConfirmed: (sab: string, value: "available" | "unavailable" | null) => void;
   addFailed: (rec: FailedRecord) => void;
   clearFailed: () => void;
   logLine: (level: LogEntry["level"], msg: string) => void;
+  clearLog: () => void;
   patchSession: (patch: Partial<SessionMeta>) => void;
   pushSample: (s: SpeedSample) => void;
   clearSamples: () => void;
@@ -117,6 +103,7 @@ interface AppState {
   clearOutreach: () => void;
   setScreen: (s: Screen) => void;
   setViewer: (id: string | null) => void;
+  setLoggedIn: (v: boolean) => void;
   resetAll: () => void;
   hydrateImages: () => Promise<void>;
 }
@@ -126,9 +113,9 @@ export const useAppStore = create<AppState>()(
     (set, get) => ({
       settings: defaultSettings,
       patients: [],
-      forms: [],
       cases: {},
       caseOrder: [],
+      monthly: {},
       failed: [],
       log: [],
       session: emptySession,
@@ -137,28 +124,30 @@ export const useAppStore = create<AppState>()(
       screen: "setup",
       viewerId: null,
       imagesHydrated: false,
+      niceDeerLoggedIn: false,
 
       setSettings: (patch) => set((s) => ({ settings: { ...s.settings, ...patch } })),
 
-      loadSheet: (patients, forms) =>
+      loadPatients: (patients) => set({ patients }),
+
+      resetRun: () =>
         set({
-          patients,
-          forms,
           cases: {},
           caseOrder: [],
+          monthly: {},
           failed: [],
-          outreach: [],
           samples: [],
+          outreach: [],
+          viewerId: null,
           session: { ...emptySession },
         }),
 
       upsertCase: (record) =>
         set((s) => {
           const prev = s.cases[record.id];
-          const merged = mergeCase(prev, record);
           return {
-            cases: { ...s.cases, [record.id]: merged },
-            caseOrder: prev ? s.caseOrder : [...s.caseOrder, record.id],
+            cases: { ...s.cases, [record.id]: mergeCase(prev, record) },
+            caseOrder: prev || s.caseOrder.includes(record.id) ? s.caseOrder : [...s.caseOrder, record.id],
           };
         }),
 
@@ -176,46 +165,59 @@ export const useAppStore = create<AppState>()(
           return { cases: { ...s.cases, [id]: { ...prev, rx: mergeRx(prev.rx, rx), updatedAt: Date.now() } } };
         }),
 
-      setImage: (id, dataUrl) => {
+      setImage: (id, dataUrl, method) => {
         set((s) => {
           const prev = s.cases[id];
           if (!prev) return s;
           return {
             cases: {
               ...s.cases,
-              [id]: { ...prev, rx: { status: "ready", dataUrl, attempts: prev.rx.attempts, updatedAt: Date.now() } },
+              [id]: {
+                ...prev,
+                rx: { status: "ready", dataUrl, method, attempts: prev.rx.attempts, updatedAt: Date.now() },
+              },
             },
           };
         });
         void saveImage(id, dataUrl);
       },
 
-      setVerdict: (id, kind, value) =>
+      setHasDrugs: (id, value) =>
         set((s) => {
           const prev = s.cases[id];
           if (!prev) return s;
-          return { cases: { ...s.cases, [id]: { ...prev, [kind]: value, updatedAt: Date.now() } } };
+          return { cases: { ...s.cases, [id]: { ...prev, hasDrugs: value, updatedAt: Date.now() } } };
         }),
 
-      resetDecisions: () =>
+      upsertMonthly: (checks) =>
         set((s) => {
-          const cases: Record<string, CaseRecord> = {};
-          for (const [id, c] of Object.entries(s.cases)) cases[id] = { ...c, drugs: null, monthly: null };
-          return { cases };
+          const next = { ...s.monthly };
+          for (const c of checks) {
+            const prev = next[c.sab];
+            next[c.sab] = prev ? { ...c, confirmed: prev.confirmed } : c;
+          }
+          return { monthly: next };
         }),
 
-      addFailed: (rec) => set((s) => ({ failed: [rec, ...s.failed].slice(0, 500) })),
+      setMonthlyConfirmed: (sab, value) =>
+        set((s) => {
+          const prev = s.monthly[sab];
+          if (!prev) return s;
+          return { monthly: { ...s.monthly, [sab]: { ...prev, confirmed: value, updatedAt: Date.now() } } };
+        }),
+
+      addFailed: (rec) => set((s) => ({ failed: [rec, ...s.failed].slice(0, 1000) })),
 
       clearFailed: () => set({ failed: [] }),
 
       logLine: (level, msg) =>
-        set((s) => ({
-          log: [{ id: uid("log"), at: Date.now(), level, msg }, ...s.log].slice(0, 600),
-        })),
+        set((s) => ({ log: [{ id: uid("log"), at: Date.now(), level, msg }, ...s.log].slice(0, 800) })),
+
+      clearLog: () => set({ log: [] }),
 
       patchSession: (patch) => set((s) => ({ session: { ...s.session, ...patch } })),
 
-      pushSample: (sample) => set((s) => ({ samples: [...s.samples, sample].slice(-240) })),
+      pushSample: (sample) => set((s) => ({ samples: [...s.samples, sample].slice(-300) })),
 
       clearSamples: () => set({ samples: [] }),
 
@@ -230,12 +232,14 @@ export const useAppStore = create<AppState>()(
 
       setViewer: (viewerId) => set({ viewerId }),
 
+      setLoggedIn: (niceDeerLoggedIn) => set({ niceDeerLoggedIn }),
+
       resetAll: () =>
         set({
           patients: [],
-          forms: [],
           cases: {},
           caseOrder: [],
+          monthly: {},
           failed: [],
           log: [],
           samples: [],
@@ -243,12 +247,13 @@ export const useAppStore = create<AppState>()(
           session: { ...emptySession },
           screen: "setup",
           viewerId: null,
+          niceDeerLoggedIn: false,
         }),
 
       /**
-       * استرجاع الصور من IndexedDB بعد إعادة تشغيل البرنامج.
-       * لو صورة ضاعت من المخزن، الحالة بتتحول لـ «failed» برسالة واضحة
-       * بدل ما تفضل «ready» بمربع فاضي في شاشة القرار.
+       * استرجاع الصور من IndexedDB بعد فتح البرنامج.
+       * أي استمارة كانت «جاهزة» وصورتها مش موجودة في التخزين بتتحول لـ failed
+       * بسبب واضح، مش مربع فاضي.
        */
       hydrateImages: async () => {
         if (get().imagesHydrated) return;
@@ -264,54 +269,44 @@ export const useAppStore = create<AppState>()(
           const dataUrl = await loadImage(id);
           const c = next[id];
           if (!c) continue;
-          if (dataUrl) next[id] = { ...c, rx: { ...c.rx, dataUrl } };
+          if (dataUrl) next[id] = { ...c, rx: { ...c.rx, dataUrl, status: "ready" } };
           else {
             missing += 1;
             next[id] = {
               ...c,
-              rx: { ...c.rx, status: "failed", reason: "الصورة غير موجودة في التخزين المحلي — أعد جلبها" },
+              rx: { ...c.rx, status: "failed", reason: "الصورة مش موجودة في التخزين المحلي — اضغط إعادة الجلب" },
             };
           }
         }
         set({ cases: next, imagesHydrated: true });
         if (missing) {
-          get().logLine("warn", `عدد ${missing} صورة روشتة لم توجد في التخزين المحلي. أعد جلبها من شاشة القرار.`);
+          get().logLine("warn", `${missing} صورة روشتة مش موجودة في التخزين المحلي. أعد جلبها من شاشة القرار.`);
         }
       },
     }),
     {
-      name: "rosheta-pro-v1",
+      name: "rosheta-pro-v2",
       storage: createJSONStorage(() => localStorage),
       partialize: (s) => ({
         ...s,
-        // الحالة دي مؤقتة للجلسة الحالية — لازم تتصفّر عند إعادة الفتح
-        // وإلا الصور مش هتسترجع من IndexedDB ويبقى عندنا مربعات فاضية.
         imagesHydrated: false,
-        // الصور مش بتتحفظ في localStorage — بتتحفظ في IndexedDB
         cases: Object.fromEntries(
-          Object.entries(s.cases).map(([id, c]) => [id, { ...c, rx: { ...c.rx, dataUrl: undefined, status: c.rx.status === "ready" && !c.rx.dataUrl ? "ready" : c.rx.status } }]),
+          Object.entries(s.cases).map(([id, c]) => [id, { ...c, rx: { ...c.rx, dataUrl: undefined } }]),
         ),
-        log: s.log.slice(0, 200),
-        samples: s.samples.slice(-120),
+        log: s.log.slice(0, 250),
+        samples: s.samples.slice(-150),
         viewerId: null,
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;
-        // جلسة كانت شغّالة قبل قفل البرنامج: مفيش محرك حي، فبنعلّمها «منتهية»
-        if (state.session.state === "running" || state.session.state === "paused" || state.session.state === "stopping") {
-          state.patchSession({
-            state: "done",
-            endedAt: state.session.endedAt ?? Date.now(),
-          });
-          state.logLine("warn", "البرنامج اتقفل أثناء الجلسة — الجلسة السابقة اتقفلت. اضغط «استكمال» عشان تكمّل الباقي.");
+        if (state.session.state === "running" || state.session.state === "paused" || state.session.state === "scanning") {
+          state.patchSession({ state: "done", endedAt: state.session.endedAt ?? Date.now() });
+          state.logLine("warn", "البرنامج اتقفل أثناء التشغيل — الجلسة السابقة اتقفلت. اضغط «استكمال» لتكملة الباقي.");
         }
-        // استرجاع الصور من IndexedDB بعد ما الحالة ترجع
         setTimeout(() => void state.hydrateImages(), 60);
       },
     },
   ),
 );
 
-export const isDemo = () => useAppStore.getState().settings.demoMode;
-export { emptySession };
-export const today = () => dateKey();
+export const todayKey = () => dateKey();
