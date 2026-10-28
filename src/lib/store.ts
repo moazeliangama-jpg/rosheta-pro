@@ -211,10 +211,23 @@ export function getSaveState() {
   return saveSnapshot;
 }
 
-function debouncedStorage() {
+/**
+ * نسخة واحدة من مخزن الحالة — عشان نقدر نعمل حفظ فوري («حفظ» في الإعداد)
+ * بدل ما الزرار يبقى شكله بيحفظ وهو مش بيعمل حاجة.
+ */
+let storageSingleton: ReturnType<typeof makeStorage> | null = null;
+
+export function flushSave(): { savedAt: number; dirty: boolean } {
+  if (!storageSingleton) return { savedAt: getSaveState().savedAt, dirty: getSaveState().dirty };
+  storageSingleton.flush();
+  return getSaveState();
+}
+
+function makeStorage() {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let last: [string, string] | null = null;
 
+  /** بيكتب آخر قيمة مستنية على القرص فورًا (نفس اللي بيحصل قبل قفل الصفحة) */
   const flush = () => {
     if (timer) {
       clearTimeout(timer);
@@ -240,6 +253,8 @@ function debouncedStorage() {
   }
 
   return {
+    /** حفظ فوري للحالة اللي مستنية (بيستخدمه زرار «حفظ» في الإعداد) */
+    flush,
     getItem: (key: string) => {
       try {
         return localStorage.getItem(key);
@@ -635,7 +650,8 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: "rosheta-pro-v2",
-      storage: createJSONStorage(debouncedStorage),
+      // نفس نسخة التخزين طول عمر البرنامج — لو اتغيرت، الحفظ الفوري مش هيلاقي القيمة المستنية
+      storage: createJSONStorage(() => (storageSingleton ??= makeStorage())),
       /**
        * اللي بيتحفظ على القرص بس.
        * قبل كده كان `...s` بيحفظ كل حاجة: كلمة سر نايس دير نص صريح، وحالة

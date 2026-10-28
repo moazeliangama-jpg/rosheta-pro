@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.5",
+  version: "1.0.6",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
@@ -45,7 +45,6 @@ contextBridge.exposeInMainWorld("roshetta", {
   credentials: {
     save: (payload) => ipcRenderer.invoke("app:save-credentials", payload),
     load: () => ipcRenderer.invoke("app:load-credentials"),
-    clear: () => ipcRenderer.invoke("app:clear-credentials"),
   },
   /** ٦٠) نسخة احتياطية يومية للحالة */
   backup: (payload) => ipcRenderer.invoke("app:backup", payload),
@@ -70,5 +69,4 @@ contextBridge.exposeInMainWorld("roshetta", {
   saveFile: (payload) => ipcRenderer.invoke("app:save-file", payload),
   openExportFolder: () => ipcRenderer.invoke("app:open-export-folder"),
   notify: (payload) => ipcRenderer.invoke("app:notify", payload),
-  openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
 });
