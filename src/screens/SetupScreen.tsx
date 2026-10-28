@@ -24,11 +24,24 @@ import { bridge, hasDesktopBridge } from "../lib/provider";
 import { Badge, Button, Card, Field, SectionTitle, Toggle } from "../components/ui";
 
 import { DiagnosticsPanel } from "../components/DiagnosticsPanel";
+import { ReadinessCard, SmartTips } from "../components/ReadinessCard";
+import { useUx } from "../lib/useUx";
+import type { ReadinessItem } from "../lib/ux";
+import { toast as toastLib } from "../lib/toast";
 import { DevicePanel } from "../components/DevicePanel";
 import { WorkspacePanel } from "../components/WorkspacePanel";
 import { cn, nowTime } from "../lib/utils";
 
-export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages: () => void }) {
+export function SetupScreen({
+  onScan,
+  onImages,
+  onAdvance,
+}: {
+  onScan: () => void;
+  onImages: () => void;
+  /** «الخطوة الجاية» — منطقها في App عشان يبقى مصدر واحد للحقيقة */
+  onAdvance: () => void;
+}) {
   const settings = useAppStore((s) => s.settings);
   const setSettings = useAppStore((s) => s.setSettings);
   const patients = useAppStore((s) => s.patients);
@@ -39,6 +52,8 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
   const loggedIn = useAppStore((s) => s.niceDeerLoggedIn);
   const setLoggedIn = useAppStore((s) => s.setLoggedIn);
   const session = useAppStore((s) => s.session);
+  const profiles = useAppStore((s) => s.profiles);
+  const applyProfile = useAppStore((s) => s.applyProfile);
 
   const [busy, setBusy] = useState<"login" | "file" | "wa" | null>(null);
   const [loginNote, setLoginNote] = useState("");
@@ -60,6 +75,45 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
   const hasScan = caseList.length > 0;
   const needsImages = caseList.filter((c) => c.valid && c.rx.status !== "ready").length;
 
+  // لوحة الجاهزية والتلميحات — بتتحسب من الحالة الحقيقية للبرنامج
+  const ux = useUx({ waState });
+  const [showReadiness, setShowReadiness] = useState(true);
+
+  /** الزرار الواحد الكبير: بيعمل اللي الخطوة الجاية عايزاه بالظبط */
+  const runNextStep = () => {
+    if (ux.action.id === "scan") return startScan();
+    if (ux.action.id === "images") return onImages();
+    onAdvance();
+  };
+
+  /**
+   * اختيار مكان العمل = خطوة واحدة: لو فيه إعداد محفوظ لنفس المكان
+   * بنعرض تطبيقه (باير + صلاحية + رسائل) بدل ما المستخدم يعيدها كل مرة.
+   */
+  const pickWorkplace = (name: string) => {
+    setSettings({ workplace: name });
+    const match = Object.keys(profiles).find((n) => profiles[n].workplace === name);
+    if (!match) return;
+    toastLib.info(`فيه إعداد محفوظ لمكان «${name}» — أطبّقه؟`, {
+      ttl: 8000,
+      action: {
+        label: "طبّق",
+        run: () => {
+          applyProfile(match);
+          toastLib.ok(`اتطبّق إعداد «${match}» — الباير والصلاحية اتظبطوا.`);
+        },
+      },
+    });
+  };
+
+  /** الضغط على سطر ناقص في لوحة الجاهزية بيروح لمكان الحل */
+  const fixItem = (item: ReadinessItem) => {
+    if (item.key === "patients") fileRef.current?.click();
+    else if (item.key === "login") void doLogin();
+    else if (item.key === "payer") toastLib.info("اختار الباير من القايمة فوق — تحته على طول.");
+    else if (item.key === "whatsapp") toastLib.info("من كارت واتساب تحت — اضغط «توليد QR».");
+  };
+
   useEffect(() => {
     const b = bridge();
     if (!b) return;
@@ -70,6 +124,35 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
       setSettings({ niceDeerUser: res.data.username, niceDeerPass: res.data.password });
     });
   }, [setSettings]);
+
+  /**
+   * أتمتة متكررة: لو «الدخول التلقائي» مفعّل وبيانات الدخول محفوظة،
+   * بنسجّل الدخول عند الفتح بدل ما المستخدم يدوس الزرار كل يوم.
+   * بيسأل `status` الأول — لو الجلسة شغالة مفيش أي تسجيل جديد.
+   */
+  useEffect(() => {
+    const b = bridge();
+    if (!b || !settings.autoLogin) return;
+    let alive = true;
+    void (async () => {
+      const saved = await b.credentials.load();
+      if (!alive || !saved?.ok || !saved.data?.username) return;
+      const st = await b.status();
+      if (!alive || st?.loggedIn) return;
+      const res = await b.login({ username: saved.data.username, password: saved.data.password });
+      if (!alive) return;
+      if (res.ok) {
+        setLoggedIn(true);
+        logLine("ok", "دخول تلقائي على نايس دير (الإعداد مفعّل).");
+      } else {
+        logLine("warn", `الدخول التلقائي فشل: ${res.error ?? "سبب غير معروف"} — اضغط «اختبار الدخول».`);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.autoLogin]);
 
   /** حفظ مشفّر لبيانات الدخول — بيتنادى بعد نجاح الدخول أو لو اليوزر طلب */
   const saveCredentials = async () => {
@@ -158,6 +241,12 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           </div>
         </Card>
       ) : null}
+
+      {/* لوحة الجاهزية: بتمنع أخطاء «ضغطت ابدأ ومفيش حاجة حصلت» */}
+      {showReadiness ? (
+        <ReadinessCard items={ux.checks} onFix={fixItem} onHide={() => setShowReadiness(false)} />
+      ) : null}
+      <SmartTips tips={ux.tips} />
 
       <DevicePanel />
 
@@ -326,7 +415,7 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           </Button>
           <select
             value={settings.workplace}
-            onChange={(e) => setSettings({ workplace: e.target.value })}
+            onChange={(e) => pickWorkplace(e.target.value)}
             className="rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white focus:border-teal-400/60 focus:outline-none"
           >
             <option value="">كل أماكن العمل ({patients.length})</option>
@@ -476,6 +565,18 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
               label="وضع الشاشة الصغيرة"
               hint="واجهة أضيق وأخف للابتوب"
             />
+            <Toggle
+              checked={settings.autoLogin}
+              onChange={(v) => setSettings({ autoLogin: v })}
+              label="دخول تلقائي عند الفتح"
+              hint="بيسجّل الدخول بالبيانات المحفوظة (المشفّرة) من غير ما تدوس زرار"
+            />
+            <Toggle
+              checked={settings.reducedMotion}
+              onChange={(v) => setSettings({ reducedMotion: v })}
+              label="تقليل الحركة"
+              hint="بيوقف الانتقالات والحركات — أسرع على الأجهزة الضعيفة وأريح للعين"
+            />
             <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
               <div className="text-xs text-white/50">الحد اليومي للرسائل</div>
               <input
@@ -501,27 +602,52 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
           </div>
         ) : null}
 
+        {/* زرار واحد كبير = الخطوة الجاية بالظبط. الباقي اختصارات صغيرة تحته. */}
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Button size="lg" onClick={startScan} disabled={session.state === "scanning" || session.state === "running"}>
-            <Search className="h-4 w-4" /> ١) جرد الاستمارات
-          </Button>
           <Button
             size="lg"
-            variant="success"
-            onClick={onImages}
-            disabled={!hasScan || needsImages === 0 || session.state === "running" || session.state === "scanning"}
+            onClick={runNextStep}
+            disabled={
+              (ux.action.id === "scan" && (session.state === "scanning" || session.state === "running")) ||
+              (ux.action.id === "images" && (session.state === "running" || session.state === "scanning"))
+            }
+            className="rounded-xl font-bold shadow-lg"
           >
-            <ImageDown className="h-4 w-4" /> ٢) جلب صور الروشتات ({needsImages})
+            {ux.action.id === "images" ? <ImageDown className="h-4 w-4" /> : <Search className="h-4 w-4" />}
+            {ux.action.label}
+            {typeof ux.action.count === "number" && ux.action.count > 0 ? ` (${ux.action.count})` : ""}
           </Button>
-          <Button variant="ghost" onClick={() => useAppStore.getState().setScreen("decision")} disabled={!hasScan}>
-            <ListChecks className="h-4 w-4" /> شاشة القرار
-          </Button>
+          <span className="text-[11px] text-white/35">الخطوة {ux.action.step} من {ux.action.totalSteps}</span>
+          <div className="ms-auto flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onScan}
+              disabled={session.state === "scanning" || session.state === "running"}
+              title="جرد الاستمارات (المرحلة ١)"
+            >
+              <Search className="h-3.5 w-3.5" /> جرد
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onImages}
+              disabled={!hasScan || needsImages === 0 || session.state === "running" || session.state === "scanning"}
+              title="جلب صور الروشتات (المرحلة ٢)"
+            >
+              <ImageDown className="h-3.5 w-3.5" /> صور ({needsImages})
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => useAppStore.getState().setScreen("decision")} disabled={!hasScan}>
+              <ListChecks className="h-3.5 w-3.5" /> القرار
+            </Button>
+          </div>
           {session.startedAt ? (
-            <span className="text-xs text-white/40">
+            <span className="w-full text-[11px] text-white/40">
               آخر تشغيل {nowTime(session.startedAt)} — {session.images} صورة
             </span>
           ) : null}
         </div>
+        <p className="mt-1.5 text-[11px] text-white/35">{ux.action.hint}</p>
         {!settings.preventDelete ? (
           <p className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
             تنبيه: «الإرجاع» مفعّل — البرنامج هيضغط <code>#btn-DeleteClaim</code> على كل استمارة بعد التقاط صورتها

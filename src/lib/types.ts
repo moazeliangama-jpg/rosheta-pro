@@ -237,6 +237,14 @@ export interface Settings {
   debugMode: boolean;
   /** وضع الشاشة الصغيرة (لابتوب) — واجهة أضيق وأخف */
   compactMode: boolean;
+  /** خلّص جولة التعريف الأولى — ما تتكررش تلقائيًا */
+  onboarded: boolean;
+  /** شاف شرح «الخطوة الجاية» — بنعرض الشريط دايمًا بعدها بدون تلميح */
+  tourSeen: boolean;
+  /** تقليل الحركة والانتقالات (لأجهزة بطيئة أو حساسية حركة) */
+  reducedMotion: boolean;
+  /** دخول تلقائي على نايس دير عند فتح البرنامج بالبيانات المحفوظة */
+  autoLogin: boolean;
   lastReportDate: string;
   lastAutoSessionDate: string;
   lastScanAt: number;

@@ -18,6 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useAppStore } from "../lib/store";
+import { toast } from "../lib/toast";
 import { orderedCases, monthlyList } from "../lib/engine";
 import { progressSummary } from "../lib/eligibility";
 import type { CaseRecord, MonthlyCheck } from "../lib/types";
@@ -114,6 +115,10 @@ export function DecisionScreen({
   const decideSab = (sab: string, value: "available" | "unavailable") => {
     const n = setSabDecision(sab, value);
     logLine("ok", `قرار جماعي على ساب ${sab}: ${value === "available" ? "بها دواء" : "بدون دواء"} — ${n} استمارة.`);
+    // إشعار فيه تراجع فوري — القرار الجماعي بيلمس استمارات كتير، لازم يكون رجعته بضغطة
+    toast.ok(`ساب ${sab}: ${value === "available" ? "بها دواء" : "بدون دواء"} (${n} استمارة)`, {
+      action: { label: "تراجع", run: () => undo() },
+    });
   };
 
   const undo = () => {
@@ -142,6 +147,11 @@ export function DecisionScreen({
     const next = nextCase(c.id);
     if (next) setViewer(next.id);
     else setViewer(null);
+    // تأكيد + تراجع في نفس المكان: مفيش نافذة بتقطع الشغل، ولو غلطت رجّعت بضغطة
+    toast.info(`${c.sab} — ${value === "available" ? "بها دواء" : "بدون دواء"}`, {
+      action: { label: "تراجع", run: () => undo() },
+      ttl: 3500,
+    });
   };
 
   /**

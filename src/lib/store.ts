@@ -173,6 +173,25 @@ export function setSaveDelay(ms: number) {
   saveDelayMs = Math.max(200, Math.min(10000, ms));
 }
 
+/**
+ * حالة الحفظ الظاهرة للمستخدم: «بيتحفظ…» / «محفوظ ١٢:٣٠».
+ * الشغل بيتحفظ تلقائيًا أصلًا — السطر ده بيطمّن المستخدم بدل ما يفتكر إنه لازم يدوس حفظ.
+ */
+let saveDirty = false;
+let savedAt = 0;
+const saveListeners = new Set<() => void>();
+
+function emitSave() {
+  for (const fn of saveListeners) fn();
+}
+export function subscribeSave(fn: () => void) {
+  saveListeners.add(fn);
+  return () => saveListeners.delete(fn);
+}
+export function getSaveState() {
+  return { dirty: saveDirty, savedAt };
+}
+
 function debouncedStorage() {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let last: [string, string] | null = null;
@@ -185,10 +204,13 @@ function debouncedStorage() {
     if (!last) return;
     try {
       localStorage.setItem(last[0], last[1]);
+      saveDirty = false;
+      savedAt = Date.now();
     } catch (err) {
       console.warn("تعذر حفظ الحالة محليًا", err);
     }
     last = null;
+    emitSave();
   };
 
   if (typeof window !== "undefined") {
@@ -208,6 +230,10 @@ function debouncedStorage() {
     },
     setItem: (key: string, value: string) => {
       last = [key, value];
+      if (!saveDirty) {
+        saveDirty = true;
+        emitSave();
+      }
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;

@@ -1,5 +1,19 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { Activity, ClipboardList, FlaskConical, ListChecks, Settings2, ShieldOff } from "lucide-react";
+import {
+  Activity,
+  ClipboardList,
+  Download,
+  FlaskConical,
+  ImageDown,
+  Keyboard,
+  ListChecks,
+  MessageCircle,
+  RotateCcw,
+  Search,
+  Settings2,
+  ShieldOff,
+  Sparkles,
+} from "lucide-react";
 import { useAppStore } from "./lib/store";
 import { SessionEngine, refreshValidity } from "./lib/engine";
 import { hasDesktopBridge, bridge } from "./lib/provider";
@@ -21,6 +35,15 @@ function ScreenFallback() {
 }
 import { Badge, Button, Card } from "./components/ui";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
+import { NextStepBar } from "./components/NextStepBar";
+import { CommandPalette, type Command } from "./components/CommandPalette";
+import { HelpOverlay } from "./components/HelpOverlay";
+import { Toaster } from "./components/Toaster";
+import { SaveStatus } from "./components/SaveStatus";
+import { OnboardingTour } from "./components/OnboardingTour";
+import { useUx } from "./lib/useUx";
+import type { NextAction } from "./lib/ux";
+import { toast } from "./lib/toast";
 import { exportApproved } from "./lib/excel";
 import { isOnline } from "./lib/net";
 import { runDailyBackup } from "./lib/backup";
@@ -48,6 +71,10 @@ export default function App() {
 
   const [, setTick] = useState(0);
   const [engine, setEngine] = useState<SessionEngine | null>(null);
+  // لوحة الأوامر والمساعدة وجولة التعريف — كلها أوفرليز خفيفة
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [tourOpen, setTourOpen] = useState(() => !useAppStore.getState().settings.onboarded);
   // ٦٧) حالة الشبكة على الشاشة — التشغيل بيستنى رجوع النت بنفسه
   const [online, setOnline] = useState(() => isOnline());
   const autoRef = useRef(false);
@@ -187,6 +214,193 @@ export default function App() {
     await new SessionEngine(onTick).rescanSab(patient);
   };
 
+  // ── تجربة الاستخدام: خطوة واحدة واضحة بدل ما المستخدم يدور إيه اللي بعده ──
+  const ux = useUx();
+  const { action, stages } = ux;
+
+  /** تنفيذ «الخطوة الجاية»: تنقّل لو ناقص تجهيز، أو تنفيذ حقيقي لو الشغل جاهز */
+  const runNext = (target: NextAction = action) => {
+    switch (target.id) {
+      case "upload":
+      case "payer":
+      case "login":
+        setScreen("setup");
+        // الإعداد هو المكان الوحيد اللي فيه الحل — بنقول للمستخدم السطر بالظبط
+        toast.info(target.hint);
+        break;
+      case "scan":
+        if (!bridges) {
+          toast.error("التشغيل الحقيقي محتاج نسخة سطح المكتب.");
+          break;
+        }
+        startEngine({ fresh: true, scan: true, images: false });
+        break;
+      case "images":
+        if (!bridges) {
+          toast.error("التشغيل الحقيقي محتاج نسخة سطح المكتب.");
+          break;
+        }
+        startEngine({ fresh: false, scan: false, images: true });
+        break;
+      case "retry":
+        void retryAllFailed();
+        break;
+      case "decide":
+        setScreen("decision");
+        break;
+      case "send":
+      case "finished":
+        setScreen("results");
+        break;
+    }
+  };
+  // الاختصارات بتقرأ أحدث نسخة من غير ما تسجّل نفسها كل رندر
+  const runRef = useRef(runNext);
+  runRef.current = runNext;
+
+  // ── نهاية الجلسة: ملخص فوري + إعادة المحاولة من نفس الإشعار ──
+  const doneRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (session.state !== "done") return;
+    const stamp = session.endedAt ?? 0;
+    if (doneRef.current === stamp) return;
+    doneRef.current = stamp;
+    if (!session.images && !session.failures) return;
+    if (session.failures > 0) {
+      toast.warn(`${session.failures} صورة لسه متعثرة بعد المحاولة الأخيرة — ${session.images} صورة جاهزة.`, {
+        ttl: 9000,
+        action: { label: "أعد المحاولة", run: () => void retryAllFailed() },
+      });
+    } else {
+      toast.ok(`خلصت — ${session.images} صورة جاهزة. شاشة القرار مستنياك.`, {
+        ttl: 8000,
+        action: { label: "افتح القرار", run: () => setScreen("decision") },
+      });
+    }
+  }, [session.state, session.endedAt, session.failures, session.images, setScreen]);
+
+  // ── اختصارات عامة: كل حاجة من الكيبورد ──
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      const typing =
+        !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable);
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+        return;
+      }
+      if (e.key === "Escape") {
+        setHelpOpen(false);
+        return;
+      }
+      if (typing) return;
+      // Ctrl+Enter = نفّذ «الخطوة الجاية» من أي شاشة
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        runRef.current();
+        return;
+      }
+      if (e.altKey && ["1", "2", "3", "4"].includes(e.key)) {
+        e.preventDefault();
+        setScreen(TABS[Number(e.key) - 1].key);
+        return;
+      }
+      if (e.key === "?") {
+        e.preventDefault();
+        setHelpOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [setScreen]);
+
+  /** أوامر لوحة Ctrl+K — كلها أفعال حقيقية على البرنامج نفسه */
+  const commands: Command[] = [
+    ...TABS.map((t, i) => ({
+      id: `nav-${t.key}`,
+      label: `اذهب إلى ${t.label}`,
+      hint: `Alt + ${i + 1}`,
+      keywords: `شاشة ${t.label} nav ${t.key}`,
+      icon: t.icon,
+      group: "التنقل",
+      run: () => setScreen(t.key),
+    })),
+    {
+      id: "act-scan",
+      label: "ابدأ الجرد",
+      hint: "قراءة استمارات السابات من نايس دير",
+      keywords: "scan جرد استمارات بدء",
+      icon: Search,
+      group: "الشغل",
+      disabled: !ux.ready,
+      run: () => startEngine({ fresh: true, scan: true, images: false }),
+    },
+    {
+      id: "act-images",
+      label: "جلب صور الروشتات",
+      hint: "المرحلة اللي بعد الجرد",
+      keywords: "images صور روشتات",
+      icon: ImageDown,
+      group: "الشغل",
+      disabled: !bridges || session.state === "running" || session.state === "scanning",
+      run: () => startEngine({ fresh: false, scan: false, images: true }),
+    },
+    {
+      id: "act-retry",
+      label: "إعادة كل الصور المتعثرة",
+      hint: "من غير ما يلمس اللي نجح",
+      keywords: "retry اعادة متعثرة فشل",
+      icon: RotateCcw,
+      group: "الشغل",
+      disabled: !bridges,
+      run: () => void retryAllFailed(),
+    },
+    {
+      id: "act-export",
+      label: "تصدير إكسل الموافقين",
+      hint: "كل القرارات + ردود واتساب",
+      keywords: "export excel تصدير اكسل تقرير",
+      icon: Download,
+      group: "النتايج",
+      run: () => {
+        const st = useAppStore.getState();
+        const count = exportApproved(Object.values(st.cases), st.outreach);
+        toast.ok(`تم تصدير ${count} صف.`);
+      },
+    },
+    {
+      id: "act-wa",
+      label: "شاشة الرسائل وواتساب",
+      keywords: "whatsapp واتساب رسائل ارسال",
+      icon: MessageCircle,
+      group: "النتايج",
+      run: () => setScreen("results"),
+    },
+    {
+      id: "help-keys",
+      label: "الاختصارات والمساعدة",
+      hint: "؟",
+      keywords: "help shortcuts اختصارات مساعدة",
+      icon: Keyboard,
+      group: "مساعدة",
+      run: () => setHelpOpen(true),
+    },
+    {
+      id: "help-tour",
+      label: "إعادة جولة التعريف",
+      keywords: "tour onboard تعريف جولة شرح",
+      icon: Sparkles,
+      group: "مساعدة",
+      run: () => setTourOpen(true),
+    },
+  ];
+
+  const finishTour = () => {
+    setTourOpen(false);
+    useAppStore.getState().setSettings({ onboarded: true, tourSeen: true });
+  };
+
   const badges: Record<string, number> = {
     decision: Object.values(cases).filter((c) => c.rx.status === "failed").length,
     results: outreach.filter((m) => m.status === "queued" || m.status === "failed").length,
@@ -235,7 +449,11 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
 
   return (
     <div
-      className={settings.compactMode ? "min-h-screen bg-[#05090a] text-[13px] text-white" : "min-h-screen bg-[#05090a] text-white"}
+      className={cn(
+        "min-h-screen bg-[#05090a] text-white",
+        settings.compactMode && "text-[13px]",
+        settings.reducedMotion && "reduce-motion",
+      )}
       dir="rtl"
     >
       <div className="pointer-events-none fixed inset-0 opacity-60 [background:radial-gradient(900px_400px_at_80%_-10%,rgba(13,148,136,0.18),transparent),radial-gradient(700px_300px_at_10%_110%,rgba(16,185,129,0.12),transparent)]" />
@@ -278,6 +496,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
 
           <div className="flex items-center gap-2">
             <Badge tone="ok">سطح المكتب</Badge>
+            <SaveStatus className="hidden sm:inline-flex" />
             {settings.payerName ? <Badge tone="info">{settings.payerName}</Badge> : <Badge tone="bad">الباير غير محدد</Badge>}
             {session.state === "scanning" || session.state === "running" ? <Badge tone="ok">تشغيل جارٍ</Badge> : null}
           </div>
@@ -294,12 +513,13 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
         </div>
       ) : null}
 
-      <main className={settings.compactMode ? "relative mx-auto max-w-[1200px] px-2 py-2" : "relative mx-auto max-w-[1500px] px-4 py-4"}>
+      <main className={settings.compactMode ? "relative mx-auto max-w-[1200px] px-2 pb-24 pt-2" : "relative mx-auto max-w-[1500px] px-4 pb-24 pt-4"}>
         <Suspense fallback={<ScreenFallback />}>
         {screen === "setup" ? (
           <SetupScreen
             onScan={() => startEngine({ fresh: true, scan: true, images: false })}
             onImages={() => startEngine({ fresh: false, scan: false, images: true })}
+            onAdvance={() => runNext()}
           />
         ) : null}
         {screen === "run" ? (
@@ -309,6 +529,7 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
             onStop={() => void engine?.stop()}
             onDecision={() => setScreen("decision")}
             onRetryFailed={() => void retryAllFailed()}
+            onSetup={() => setScreen("setup")}
           />
         ) : null}
         {screen === "decision" ? <DecisionScreen onRetry={retryOne} onRescanSab={rescanSab} /> : null}
@@ -316,8 +537,16 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
         </Suspense>
       </main>
 
+      {/* الشريط الثابت: الخطوة الجاية + المراحل — أوفر لايه فوق كل الشاشات */}
+      <NextStepBar action={action} stages={stages} onRun={() => runNext()} onHelp={() => setHelpOpen(true)} />
+
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
+      <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
+      <OnboardingTour open={tourOpen} onFinish={finishTour} />
+      <Toaster />
+
       {session.state === "done" && screen !== "decision" ? (
-        <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2 space-y-1.5">
+        <div className="fixed bottom-20 left-1/2 z-30 -translate-x-1/2 space-y-1.5">
           {/* ٨٢) ملخص نهاية الجلسة في سطرين */}
           <div className="rounded-xl border border-white/10 bg-[#0b1518]/95 px-4 py-2 text-center text-[11px] text-white/60 shadow-xl backdrop-blur">
             <div>
