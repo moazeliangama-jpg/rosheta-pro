@@ -1,9 +1,15 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
+import type { ButtonHTMLAttributes, HTMLAttributes, InputHTMLAttributes, ReactNode } from "react";
 import { cn } from "../lib/utils";
 
-export function Card({ className, children }: { className?: string; children: ReactNode }) {
+/** بطاقة عامة — بتقبل خصائص div العادية (onDrop/onDragOver… إلخ) */
+export function Card({
+  className,
+  children,
+  ...rest
+}: { className?: string; children: ReactNode } & HTMLAttributes<HTMLDivElement>) {
   return (
     <div
+      {...rest}
       className={cn(
         "rounded-2xl border border-white/10 bg-[#0b1518]/80 p-5 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.9)] backdrop-blur",
         className,

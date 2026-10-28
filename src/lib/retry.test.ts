@@ -46,3 +46,10 @@ test("وقف مبكر لو أول ٥ سابات فشلوا", () => {
   assert.equal(shouldAbortEarly(4, 4), false);
   assert.equal(shouldAbortEarly(5, 200), false, "بعد ما الجلسة مشيت فشل ٥ مش سبب للوقف");
 });
+
+test("خطأ بيانات الدخول بيتصنّف إعداد حتى لو فيه كلمة «تسجيل الدخول»", () => {
+  assert.equal(classifyError("تسجيل الدخول لم يكتمل — تحقق من اليوزر والباسورد"), "config");
+  assert.equal(classifyError("بيانات دخول نايس دير غير محفوظة"), "config");
+  // والجلسة المنتهية تفضل جلسة
+  assert.equal(classifyError("انتهت جلسة نايس دير"), "session");
+});

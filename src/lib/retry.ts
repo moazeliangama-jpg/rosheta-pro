@@ -35,15 +35,17 @@ const SESSION = [
 const CONFIG = [
   /الباير/,
   /payer/i,
-  /اسم المستخدم|كلمة السر|بيانات الدخول|باسورد|باسوورد/,
+  /اسم المستخدم|كلمة السر|بيانات (ال)?دخول|باسورد|باسوورد|اليوزر|يرجى تسجيل الدخول/,
   /credentials/i,
 ];
 
 export function classifyError(message: string): ErrorKind {
   const text = String(message ?? "");
   if (!text) return "transient";
-  if (SESSION.some((r) => r.test(text))) return "session";
+  // الإعداد الناقص بيتفحص قبل «الجلسة»: رسالة «تسجيل الدخول لم يكتمل — راجع الباسورد»
+  // كانت بتتصنّف «جلسة» فالبرنامج يعيد الدخول بدل ما يقول للمستخدم إن البيانات غلط.
   if (CONFIG.some((r) => r.test(text))) return "config";
+  if (SESSION.some((r) => r.test(text))) return "session";
   if (PERMANENT.some((r) => r.test(text))) return "permanent";
   return "transient";
 }

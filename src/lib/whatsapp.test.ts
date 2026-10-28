@@ -196,3 +196,24 @@ test("نفس الرد مش بيتصنّف تاني", () => {
   assert.equal(isSameReply(m, "موافق"), true);
   assert.equal(isSameReply(m, "تمام"), false);
 });
+
+test("الرسالة اللي فشلت بتتعاد تاني (مش بتتحسب مرسلة)", () => {
+  const c = { ...caseBase, sab: "555", hasDrugs: "available" as const };
+  const failed = [
+    {
+      id: "m1",
+      sab: "555",
+      name: "أ",
+      phone: "201000000000",
+      kind: "drugs" as const,
+      text: "قديمة",
+      status: "failed" as const,
+      at: Date.now(),
+      reply: "pending" as const,
+    },
+  ];
+  const queue = buildOutreachQueue([c], {}, defaultSettings, failed);
+  assert.equal(queue.length, 1, "رسالة فاشلة المفروض تتعاد");
+  const sent = [{ ...failed[0], status: "sent" as const }];
+  assert.equal(buildOutreachQueue([c], {}, defaultSettings, sent).length, 0);
+});

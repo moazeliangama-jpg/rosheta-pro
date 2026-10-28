@@ -13,13 +13,25 @@
 //   • الإرجاع (Delete) بيتم في طابور منفصل في الخلفية — مش بيوقف جلب الصور.
 //   • بركة نوافذ قابلة لإعادة الاستخدام + تسخين مسبق (warm-up) لكل النوافذ.
 // ============================================================================
-const { app, BrowserWindow, ipcMain, session, shell, powerSaveBlocker, Notification } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  session,
+  shell,
+  powerSaveBlocker,
+  Notification,
+  safeStorage,
+} = require("electron");
 const os = require("node:os");
 const fs = require("node:fs");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 
 const S = require("./snippets.cjs");
 const { parseDateToISO, isMonthlyText } = require("./nice-utils.cjs");
+const SEC = require("./security.cjs");
+const UPD = require("./updates.cjs");
 
 const BASE = "https://nicedeer.net";
 const LOGIN_URL = `${BASE}/Account/Login`;
@@ -74,14 +86,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // التجهيز الذاتي: المثبّت بيفترض إن الجهاز مش جاهز، والبرنامج بيجهّز نفسه بنفسه
 // ---------------------------------------------------------------------------
 
+/**
+ * ٩٧) النسخة المحمولة (Portable): البيانات بتتحفظ في مجلد جنب الملف التنفيذي،
+ * عشان تنقل البرنامج على فلاشة ومعاه قراراتك وصورك. النسخة المثبّتة بتفضل في
+ * مجلد بيانات ويندوز العادي.
+ */
+function configurePortableDataDir() {
+  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+  if (!portableDir) return false;
+  try {
+    const target = path.join(portableDir, "RoshettaPro-Data");
+    fs.mkdirSync(target, { recursive: true });
+    app.setPath("userData", target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const PORTABLE = configurePortableDataDir();
+
 const dataDir = () => app.getPath("userData");
 const logsDir = () => path.join(dataDir(), "logs");
 const diagDir = () => path.join(dataDir(), "diagnostics");
 const backupDir = () => path.join(dataDir(), "backups");
+const secureDir = () => path.join(dataDir(), "secure");
+const credsFile = () => path.join(secureDir(), "credentials.bin");
 
 /** إنشاء المجلدات اللي البرنامج محتاجها (لو مش موجودة) — بيشتغل أول تشغيل */
 function ensureRuntimeDirs() {
-  const dirs = { data: dataDir(), logs: logsDir(), diagnostics: diagDir(), backups: backupDir() };
+  const dirs = {
+    data: dataDir(),
+    logs: logsDir(),
+    diagnostics: diagDir(),
+    backups: backupDir(),
+    secure: secureDir(),
+  };
   for (const dir of Object.values(dirs)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -194,6 +234,64 @@ function pruneRuntime({ all = false } = {}) {
     backups: filesStats(backupDir()),
     retention: RETENTION_DAYS,
   };
+}
+
+// ---------------------------------------------------------------------------
+// بيانات الدخول: متشفّرة على القرص بمفتاح النظام (DPAPI على ويندوز)
+// قبل كده كانت بتتحفظ نص صريح في localStorage — أي ملف على الجهاز كان يقراها.
+// ---------------------------------------------------------------------------
+
+/**
+ * حفظ بيانات دخول نايس دير مشفّرة.
+ * لو تشفير النظام مش متاح (نادر جدًا)، بنرفض الحفظ بدل ما نكتبها نص صريح.
+ */
+function saveCredentialsSecure({ username, password } = {}) {
+  const user = String(username || "").trim();
+  const pass = String(password || "");
+  if (!user || !pass) return { ok: false, error: "اليوزر والباسورد مطلوبين" };
+  if (!safeStorage.isEncryptionAvailable()) {
+    return {
+      ok: false,
+      error: "تشفير النظام غير متاح على الجهاز — البرنامج مش هيحفظ كلمة السر. اكتبها كل مرة.",
+    };
+  }
+  try {
+    fs.mkdirSync(secureDir(), { recursive: true });
+    const payload = JSON.stringify({ username: user, password: pass, at: Date.now() });
+    const encrypted = safeStorage.encryptString(payload);
+    const tmp = `${credsFile()}.tmp`;
+    fs.writeFileSync(tmp, encrypted);
+    fs.renameSync(tmp, credsFile());
+    appendLog("info", "اتحفظت بيانات الدخول مشفّرة");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+/** قراءة بيانات الدخول المشفّرة (بترجع {} لو مش موجودة) */
+function loadCredentialsSecure() {
+  try {
+    if (!fs.existsSync(credsFile())) return { ok: true, data: null };
+    if (!safeStorage.isEncryptionAvailable()) return { ok: false, error: "تشفير النظام غير متاح" };
+    const raw = safeStorage.decryptString(fs.readFileSync(credsFile()));
+    const parsed = JSON.parse(raw);
+    return {
+      ok: true,
+      data: { username: String(parsed.username || ""), password: String(parsed.password || "") },
+    };
+  } catch {
+    return { ok: false, error: "الملف المشفّر تالف أو من جهاز تاني — اكتب البيانات مرة واحدة." };
+  }
+}
+
+function clearCredentialsSecure() {
+  try {
+    fs.rmSync(credsFile(), { force: true });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
 }
 
 function freeDiskMb() {
@@ -509,8 +607,13 @@ function setupResourceBlocking() {
   }
 }
 
+/**
+ * أي نافذة منبثقة من نايس دير بتتقفل، والسؤال بس: نفتح الرابط ده في المتصفح؟
+ * الفلترة بقت على المضيف الحقيقي (SEC) — الدومينات اللي بتشبه الاسم بتترفض،
+ * وبروتوكولات زي file: و ms-msdt: مش بتتفتح خالص.
+ */
 const DEFAULT_POPUP_HANDLER = ({ url }) => {
-  if (!/^https?:\/\/([a-z0-9-]+\.)*nicedeer\.[a-z]+/i.test(url)) shell.openExternal(url);
+  if (SEC.isSafeExternalUrl(url) && !SEC.isNiceDeerUrl(url)) void shell.openExternal(url);
   return { action: "deny" };
 };
 
@@ -898,9 +1001,12 @@ async function ensureSearchPage(win, credentials) {
 
 async function searchSub(win, { sab, payerId, payerName, timeoutMs }) {
   const timeout = Math.max(4000, Math.min(60000, Number(timeoutMs) || TIMEOUTS.search));
+  // الساب بيتنضف قبل ما يتحقن في الصفحة — مدخل غير موثوق من الواجهة
+  const cleanSab = SEC.sanitizeSab(sab);
+  if (!cleanSab) throw new Error("رقم الساب غير صالح");
   const res = await runStrict(
     win,
-    S.fastSearchScript({ sab, payerId, payerName, timeoutMs: timeout }),
+    S.fastSearchScript({ sab: cleanSab, payerId, payerName, timeoutMs: timeout }),
   );
 
   if (!res) throw new Error("الصفحة لم ترد على البحث — أعد المحاولة");
@@ -983,11 +1089,12 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
       const resized = shot.getSize().width > 1600
         ? shot.resize({ width: 1600, quality: "best" })
         : shot;
-      return {
-        dataUrl: `data:image/png;base64,${resized.toPNG().toString("base64")}`,
-        method: "screenshot",
-        ms: 0,
-      };
+      // ٢١) JPEG بدل PNG: نفس الوضوح للصفحة، وحجم أقل بحوالي ٥–٨ أضعاف
+      const jpg = resized.toJPEG(82);
+      const dataUrl = jpg && jpg.length
+        ? `data:image/jpeg;base64,${jpg.toString("base64")}`
+        : `data:image/png;base64,${resized.toPNG().toString("base64")}`;
+      return { dataUrl, method: jpg && jpg.length ? "screenshot-jpeg" : "screenshot", ms: 0 };
     }
   } catch {
     /* تجاهل */
@@ -1322,12 +1429,12 @@ ipcMain.handle("nd:warmup", async (_e, payload) => {
   captures.max = Math.max(1, Math.min(count, MAX_WORKERS, 8));
   const started = Date.now();
   setBusy(true);
-  const results = [];
-  for (let i = 0; i < count; i++) {
-    // فتح تدريجي: ١٦ نافذة مرة واحدة بتعمل قفزة في الرام وبتبطّأ أول ساب
-    if (i > 0) await sleep(120);
-    results.push(
-      await (async () => {
+  // التسخين بالتوازي مع تباعد ١٢٠ مللي بين كل نافذة:
+  // قبل كده كان حلقة `await` متسلسلة — ٨ نوافذ كانت بتاخد وقت مجموع الخطوات
+  // بدل أقصى خطوة. التباعد لسه موجود عشان ما نعملش قفزة في الرام مرة واحدة.
+  const results = await Promise.all(
+    Array.from({ length: count }, async (_, i) => {
+      if (i > 0) await sleep(i * 120);
       try {
         const win = await workers.acquire(60000);
         try {
@@ -1343,9 +1450,8 @@ ipcMain.handle("nd:warmup", async (_e, payload) => {
       } catch (err) {
         return { index: i, ok: false, error: String(err?.message || err) };
       }
-      })(),
-    );
-  }
+    }),
+  );
   return {
     ok: results.every((r) => r.ok),
     workers: count,
@@ -1373,6 +1479,75 @@ ipcMain.handle("nd:login", async (_e, payload) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// ٩٦) التحديث من GitHub Releases: فحص + تنزيل + تشغيل المثبّت
+// ---------------------------------------------------------------------------
+
+const UPDATE_REPO = "moazeliangama-jpg/rosheta-pro";
+let updateState = { checkedAt: 0, info: null, downloading: 0, file: "" };
+
+async function fetchLatestRelease() {
+  const res = await fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+    headers: { Accept: "application/vnd.github+json", "User-Agent": "RoshettaPro-Updater" },
+  });
+  if (!res.ok) throw new Error(`GitHub ردّ بـ ${res.status}`);
+  return res.json();
+}
+
+ipcMain.handle("app:check-update", async () => {
+  try {
+    const release = await fetchLatestRelease();
+    const latest = String(release?.tag_name || release?.name || "").replace(/^v/i, "");
+    const asset = UPD.pickInstallerAsset(release?.assets || []);
+    const info = UPD.describeUpdate({ current: app.getVersion(), latest, asset });
+    updateState = { ...updateState, checkedAt: Date.now(), info };
+    appendLog("info", `update: ${info.message}`);
+    return {
+      ok: true,
+      data: { ...info, current: app.getVersion(), htmlUrl: release?.html_url || "" },
+    };
+  } catch (err) {
+    const message = String(err?.message || err);
+    appendLog("warn", `update check failed: ${message}`);
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle("app:download-update", async (_e, payload) => {
+  try {
+    if (!SEC.isSafeExternalUrl(payload?.url)) return { ok: false, error: "رابط التحديث غير صالح" };
+    const name = String(payload?.asset || "RoshettaPro-Setup.exe").replace(/[^\w.\-]/g, "_");
+    const dir = path.join(app.getPath("temp"), "roshetta-update");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    const res = await fetch(payload.url, { headers: { "User-Agent": "RoshettaPro-Updater" } });
+    if (!res.ok) throw new Error(`فشل تنزيل التحديث (${res.status})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(file, buffer);
+    updateState = { ...updateState, downloading: 0, file };
+    appendLog("ok", `update downloaded: ${file} (${Math.round(buffer.length / 1024 / 1024)} ميجا)`);
+    return { ok: true, data: { file, bytes: buffer.length } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+/** تشغيل المثبّت اللي اتنزّل — NSIS بيقبل /S للتثبيت الصامت */
+ipcMain.handle("app:run-update", async (_e, payload) => {
+  try {
+    const file = String(payload?.file || updateState.file || "");
+    if (!file || !fs.existsSync(file)) return { ok: false, error: "ملف التحديث مش موجود" };
+    const child = spawn(file, ["/S"], { detached: true, stdio: "ignore" });
+    child.unref();
+    appendLog("ok", `installer started: ${file}`);
+    // بنقفل البرنامج عشان المثبّت يقدر يستبدل الملفات
+    setTimeout(() => app.quit(), 1500);
+    return { ok: true, data: { file } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.handle("app:preflight", async () => {
   try {
     return { ok: true, data: await preflight() };
@@ -1385,6 +1560,20 @@ ipcMain.handle("app:preflight", async () => {
  * ٦٠) نسخة احتياطية يومية: الريندرر بيبعت الحالة كـ JSON، والملف بيتحفظ في
  * مجلد بيانات البرنامج (مش مجلد التثبيت — عشان مثبّت لكل المستخدمين ما يمنعش الكتابة).
  */
+ipcMain.handle("app:save-credentials", async (_e, payload) => saveCredentialsSecure(payload || {}));
+
+ipcMain.handle("app:load-credentials", async () => {
+  const res = loadCredentialsSecure();
+  // بنحطها في الذاكرة كمان عشان الجلسة تشتغل من غير ما تتبعت تاني
+  if (res.ok && res.data) credentials = { username: res.data.username, password: res.data.password };
+  return res;
+});
+
+ipcMain.handle("app:clear-credentials", async () => {
+  credentials = { username: "", password: "" };
+  return clearCredentialsSecure();
+});
+
 ipcMain.handle("app:backup", async (_e, payload) => {
   try {
     const json = String(payload?.json || "");
@@ -1640,8 +1829,9 @@ ipcMain.handle("app:open-search-site", async () => {
 });
 
 ipcMain.handle("app:open-external", async (_e, url) => {
-  if (typeof url === "string" && /^https?:\/\//.test(url)) await shell.openExternal(url);
-  return true;
+  if (!SEC.isSafeExternalUrl(url)) return { ok: false, error: "رابط غير مسموح" };
+  await shell.openExternal(url);
+  return { ok: true };
 });
 
 // ---------------------------------------------------------------------------
@@ -1732,7 +1922,8 @@ function createMainWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // النافذة الرئيسية مش محتاجة أي وصول لـ Node — الـ preload بيكلم main بالـ IPC بس
+      sandbox: true,
       webSecurity: true,
       backgroundThrottling: false,
     },
@@ -1743,14 +1934,14 @@ function createMainWindow() {
   else win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
 
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (SEC.isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
   });
+  // التنقّل برة ملفات البرنامج (أو سيرفر التطوير) بيتمنع، والرابط الآمن بس بيتفتح برة
   win.webContents.on("will-navigate", (event, url) => {
-    if (!url.startsWith("file://") && !url.includes("localhost:")) {
-      event.preventDefault();
-      shell.openExternal(url);
-    }
+    if (SEC.isInternalAppUrl(url)) return;
+    event.preventDefault();
+    if (SEC.isSafeExternalUrl(url)) void shell.openExternal(url);
   });
   return win;
 }
@@ -1760,7 +1951,7 @@ app.whenReady().then(() => {
   ensureRuntimeDirs();
   appendLog(
     "info",
-    `بدء التشغيل — Roshetta Pro · Electron ${process.versions.electron} · ${os.platform()} ${os.arch()} · رام ${Math.round(os.totalmem() / 1024 ** 3)} جيجا · ${os.cpus()?.length || 0} أنوية`,
+    `بدء التشغيل — Roshetta Pro v${app.getVersion()}${PORTABLE ? " (نسخة محمولة — البيانات جنب الملف)" : ""} · Electron ${process.versions.electron} · ${os.platform()} ${os.arch()} · رام ${Math.round(os.totalmem() / 1024 ** 3)} جيجا · ${os.cpus()?.length || 0} أنوية`,
   );
   process.on("uncaughtException", (err) => appendLog("error", `uncaught: ${err?.stack || err}`));
   process.on("unhandledRejection", (err) => appendLog("error", `unhandled: ${String(err)}`));

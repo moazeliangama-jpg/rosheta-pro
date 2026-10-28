@@ -80,7 +80,8 @@ export function mergeCase(prev: CaseRecord | undefined, next: CaseRecord): CaseR
     ...next,
     rx: mergeRx(prev.rx, next.rx),
     hasDrugs: next.hasDrugs ?? prev.hasDrugs,
-    updatedAt: Date.now(),
+    // وقت التحديث بييجي من السجل نفسه (اللي بيحدّده المنتج)، مش الوقت الحالي
+    updatedAt: next.updatedAt || prev.updatedAt || Date.now(),
   };
 }
 
@@ -280,19 +281,26 @@ export const useAppStore = create<AppState>()(
        * قبل كده كل استمارة كانت بتنسخ خريطة الحالات كلها — مع ٣٠ استمارة
        * في الساب ده كان ٣٠ نسخة كاملة من كل الحالات.
        */
+      /**
+       * دفعة واحدة لكل استمارات الساب.
+       * التحقق من «مضاف قبل كده» بيستخدم Set — قبل كده كان includes جوه حلقة،
+       * وده O(عدد الاستمارات × طول القائمة) مع كل ساب.
+       */
       upsertCases: (records) =>
         set((s) => {
           if (!records.length) return s;
           const cases = { ...s.cases };
-          let caseOrder = s.caseOrder;
+          const known = new Set(s.caseOrder);
           const added: string[] = [];
           for (const record of records) {
             const prev = cases[record.id];
             cases[record.id] = mergeCase(prev, record);
-            if (!prev && !caseOrder.includes(record.id)) added.push(record.id);
+            if (!prev && !known.has(record.id)) {
+              known.add(record.id);
+              added.push(record.id);
+            }
           }
-          if (added.length) caseOrder = [...caseOrder, ...added];
-          return { cases, caseOrder };
+          return added.length ? { cases, caseOrder: [...s.caseOrder, ...added] } : { cases };
         }),
 
       patchCase: (id, patch) =>
@@ -552,16 +560,34 @@ export const useAppStore = create<AppState>()(
     {
       name: "rosheta-pro-v2",
       storage: createJSONStorage(debouncedStorage),
+      /**
+       * اللي بيتحفظ على القرص بس.
+       * قبل كده كان `...s` بيحفظ كل حاجة: كلمة سر نايس دير نص صريح، وحالة
+       * الواجهة المؤقتة، وكل خريطة الحالات — وده كان بيقرّب من حد localStorage
+       * (٥ ميجا) وبيبطّأ كل حفظ.
+       */
       partialize: (s) => ({
-        ...s,
-        imagesHydrated: false,
+        settings: { ...s.settings, niceDeerPass: "" },
+        patients: s.patients,
+        // الصور مش بتتحفظ هنا — مكانها IndexedDB (صورة base64 بتاكل مساحة المفتاح كله)
         cases: Object.fromEntries(
           Object.entries(s.cases).map(([id, c]) => [id, { ...c, rx: { ...c.rx, dataUrl: undefined } }]),
         ),
+        caseOrder: s.caseOrder,
+        monthly: s.monthly,
+        failed: s.failed,
+        sabCache: s.sabCache,
+        seenForms: s.seenForms,
+        hourly: s.hourly,
+        history: s.history.slice(0, 30),
+        profiles: s.profiles,
+        outreach: s.outreach,
+        session: s.session,
+        screen: s.screen,
+        lastDecisionId: s.lastDecisionId,
         log: s.log.slice(0, 250),
         samples: s.samples.slice(-150),
         steps: s.steps.slice(-1200),
-        viewerId: null,
       }),
       onRehydrateStorage: () => (state) => {
         if (!state) return;

@@ -21,6 +21,18 @@ contextBridge.exposeInMainWorld("roshetta", {
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
   preflight: () => ipcRenderer.invoke("app:preflight"),
+  /** ٩٦) تحديث البرنامج من GitHub Releases */
+  updates: {
+    check: () => ipcRenderer.invoke("app:check-update"),
+    download: (payload) => ipcRenderer.invoke("app:download-update", payload),
+    run: (payload) => ipcRenderer.invoke("app:run-update", payload),
+  },
+  /** بيانات الدخول: بتتحفظ مشفّرة بمفتاح النظام مش في ملف الإعدادات */
+  credentials: {
+    save: (payload) => ipcRenderer.invoke("app:save-credentials", payload),
+    load: () => ipcRenderer.invoke("app:load-credentials"),
+    clear: () => ipcRenderer.invoke("app:clear-credentials"),
+  },
   /** ٦٠) نسخة احتياطية يومية للحالة */
   backup: (payload) => ipcRenderer.invoke("app:backup", payload),
   /** ١٢٧) صيانة ملفات اللوج والتشخيص */

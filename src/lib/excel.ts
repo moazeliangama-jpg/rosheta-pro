@@ -9,7 +9,7 @@ import type {
   StepSample,
 } from "./types";
 import { STEP_LABEL, bottleneck, slowestSabs, stepsToCsv, summarize } from "./metrics";
-import { dateKey, downloadBlob, safeName } from "./utils";
+import { dateKey, downloadBlob, normalizeSab, safeName } from "./utils";
 
 const SOURCE_LABEL: Record<string, string> = {
   "pre-approval": "Pre-Approval",
@@ -39,7 +39,9 @@ export async function readPatientsFile(file: File): Promise<PatientRow[]> {
   const patients: PatientRow[] = [];
   const seen = new Set<string>();
   for (const row of rows) {
-    const sab = pick(row, ["الساب", "sab", "Sub", "Card", "كارت"]);
+    // الساب بياخد نفس التنظيف اللي في preparePatients (مسافات/أرقام عربية/شرطات)،
+    // وبعد التنظيف بنشيل المكرر — قبل كده «١٢٣٤٥» و«12345» كانوا بيعدّوا كسابين.
+    const sab = normalizeSab(pick(row, ["الساب", "sab", "Sub", "Card", "كارت"]));
     if (!sab || seen.has(sab)) continue;
     seen.add(sab);
     patients.push({

@@ -113,6 +113,8 @@ export class SessionEngine {
 
   /** قياس كل خطوة — بيتفرّغ للمخزن كل نبضة بدل تحديث مع كل عملية */
   private steps: StepSample[] = [];
+  /** قياس الساعات بيتجمّع هنا وبيتفرّغ في النبضة (بدل تحديث مخزن لكل خطوة) */
+  private hourSamples: Array<{ hour: number; ms: number }> = [];
   private budget = new RetryBudget(150);
   private consecutiveFailures = 0;
   private avgRecent: number[] = [];
@@ -149,9 +151,9 @@ export class SessionEngine {
     this.steps.push({ at: Date.now(), sab, step, ms: Math.round(ms), ok, note });
     this.avgRecent.push(Math.round(ms));
     if (this.avgRecent.length > 40) this.avgRecent.shift();
-    // ١١٢) سرعة السيرفر حسب الساعة — بيتبني على أسبوع
+    // ١١٢) سرعة السيرفر حسب الساعة — بيتجمّع هنا وبيتفرّغ في النبضة
     if (ok && (step === "search" || step === "capture") && ms > 0) {
-      useAppStore.getState().addHourSample(new Date().getHours(), ms);
+      this.hourSamples.push({ hour: new Date().getHours(), ms: Math.round(ms) });
     }
     // ١١٤) تتبّع أخطاء الشبكة المتتالية
     if (ok) this.networkHits = 0;
@@ -159,10 +161,18 @@ export class SessionEngine {
   }
 
   private flushSteps() {
-    if (!this.steps.length) return;
-    const batch = this.steps;
-    this.steps = [];
-    useAppStore.getState().pushSteps(batch);
+    if (this.steps.length) {
+      const batch = this.steps;
+      this.steps = [];
+      useAppStore.getState().pushSteps(batch);
+    }
+    // نفس الفكرة للساعات: تحديث واحد لكل نبضة بدل تحديث لكل خطوة
+    if (this.hourSamples.length) {
+      const hours = this.hourSamples;
+      this.hourSamples = [];
+      const store = useAppStore.getState();
+      for (const h of hours) store.addHourSample(h.hour, h.ms);
+    }
   }
 
   /** نقطة استكمال: آخر ساب اكتمل بيتحفظ فورًا */
@@ -237,6 +247,7 @@ export class SessionEngine {
     this.captureCount = 0;
     this.keyToId.clear();
     this.steps = [];
+    this.hourSamples = [];
     this.avgRecent = [];
     this.prevAvg = 0;
     this.budget = new RetryBudget(150);
@@ -274,6 +285,10 @@ export class SessionEngine {
       store.clearSabCache(dateKey());
       if (!prepared.list.length) {
         this.log("warn", `مفيش سابات محتاجة شغل. ${prepareNote(prepared.stats)}`);
+        // قبل كده كنا بنرجع من غير ما نرجّع سرعة الحفظ ولا نرجّع حالة الجلسة،
+        // فالحفظ كان يفضل بطيء (٣ ثواني) والجلسة تفضل «شغالة» في الواجهة.
+        setSaveDelay(600);
+        useAppStore.getState().patchSession({ state: "done", phase: "idle", endedAt: Date.now() });
         activeEngine = null;
         return;
       }
