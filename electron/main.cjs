@@ -15,6 +15,7 @@
 // ============================================================================
 const { app, BrowserWindow, ipcMain, session, shell, powerSaveBlocker, Notification } = require("electron");
 const os = require("node:os");
+const fs = require("node:fs");
 const path = require("node:path");
 
 const S = require("./snippets.cjs");
@@ -68,6 +69,221 @@ app.commandLine.appendSwitch("disable-3d-apis");
 app.commandLine.appendSwitch("disable-extensions");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// التجهيز الذاتي: المثبّت بيفترض إن الجهاز مش جاهز، والبرنامج بيجهّز نفسه بنفسه
+// ---------------------------------------------------------------------------
+
+const dataDir = () => app.getPath("userData");
+const logsDir = () => path.join(dataDir(), "logs");
+const diagDir = () => path.join(dataDir(), "diagnostics");
+const backupDir = () => path.join(dataDir(), "backups");
+
+/** إنشاء المجلدات اللي البرنامج محتاجها (لو مش موجودة) — بيشتغل أول تشغيل */
+function ensureRuntimeDirs() {
+  const dirs = { data: dataDir(), logs: logsDir(), diagnostics: diagDir(), backups: backupDir() };
+  for (const dir of Object.values(dirs)) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+    } catch {
+      /* لو مش قادر، الـ preflight هيقول للمستخدم */
+    }
+  }
+  return dirs;
+}
+
+let appLogPath = null;
+let appLogSize = 0;
+
+/** ١٢١ + ١٢٧) لوج على القرص بيدور لما يكبر (آخر ٥ ملفات) */
+function appendLog(level, msg) {
+  try {
+    if (!appLogPath) {
+      fs.mkdirSync(logsDir(), { recursive: true });
+      appLogPath = path.join(logsDir(), "rosheta.log");
+      appLogSize = fs.existsSync(appLogPath) ? fs.statSync(appLogPath).size : 0;
+    }
+    if (appLogSize > 2 * 1024 * 1024) {
+      for (let i = 4; i >= 1; i--) {
+        const from = i === 1 ? appLogPath : path.join(logsDir(), `rosheta.${i - 1}.log`);
+        const to = path.join(logsDir(), `rosheta.${i}.log`);
+        try {
+          if (fs.existsSync(from)) fs.renameSync(from, to);
+        } catch {
+          /* تجاهل */
+        }
+      }
+      appLogSize = 0;
+    }
+    const line = `${new Date().toISOString()} [${String(level).toUpperCase()}] ${String(msg)}${os.EOL}`;
+    fs.appendFileSync(appLogPath, line, "utf8");
+    appLogSize += Buffer.byteLength(line);
+  } catch {
+    /* لو فشل اللوج، البرنامج بيكمل عادي */
+  }
+}
+
+/**
+ * ١٢٧) الصيانة: تنضيف اللوجات واللقطات القديمة تلقائيًا، وإحصاء حجمها.
+ * البرنامج مش بيسيب ملفات تكبر لانهائي على جهاز المستخدم.
+ */
+const RETENTION_DAYS = { logs: 14, diagnostics: 7 };
+
+function dirFiles(dir) {
+  try {
+    return fs
+      .readdirSync(dir)
+      .map((name) => {
+        const full = path.join(dir, name);
+        const st = fs.statSync(full);
+        return { name, full, size: st.size, mtime: st.mtimeMs };
+      })
+      .filter((f) => f.size >= 0);
+  } catch {
+    return [];
+  }
+}
+
+function filesStats(dir) {
+  const files = dirFiles(dir);
+  return {
+    count: files.length,
+    bytes: files.reduce((n, f) => n + f.size, 0),
+  };
+}
+
+/** تنضيف الملفات الأقدم من المدة المسموحة (أو كلها لو all=true) */
+function pruneRuntime({ all = false } = {}) {
+  const now = Date.now();
+  const removed = [];
+  for (const [key, days] of Object.entries(RETENTION_DAYS)) {
+    const dir = key === "logs" ? logsDir() : diagDir();
+    for (const f of dirFiles(dir)) {
+      const expired = all || now - f.mtime > days * 24 * 60 * 60 * 1000;
+      if (!expired) continue;
+      try {
+        fs.rmSync(f.full, { force: true });
+        removed.push(f.name);
+      } catch {
+        /* تجاهل */
+      }
+    }
+  }
+  // النسخ الاحتياطية: بنحتفظ بآخر ٧ بس (مش بالعمر — كل نسخة يوم)
+  try {
+    const backups = dirFiles(backupDir()).sort((a, b) => b.mtime - a.mtime);
+    for (const f of backups.slice(7)) {
+      try {
+        fs.rmSync(f.full, { force: true });
+        removed.push(f.name);
+      } catch {
+        /* تجاهل */
+      }
+    }
+  } catch {
+    /* تجاهل */
+  }
+  if (all) {
+    appLogPath = null;
+    appLogSize = 0;
+  }
+  return {
+    removed: removed.length,
+    logs: filesStats(logsDir()),
+    diagnostics: filesStats(diagDir()),
+    backups: filesStats(backupDir()),
+    retention: RETENTION_DAYS,
+  };
+}
+
+function freeDiskMb() {
+  try {
+    if (typeof fs.statfsSync === "function") {
+      const st = fs.statfsSync(dataDir());
+      return Math.round((Number(st.bavail) * Number(st.bsize)) / 1024 ** 2);
+    }
+  } catch {
+    /* مش مدعوم */
+  }
+  return null;
+}
+
+/** فحص جاهزية الجهاز — بيجهّز الناقص بنفسه وبيقول للمستخدم النتيجة */
+async function preflight() {
+  const dirs = ensureRuntimeDirs();
+  try {
+    pruneRuntime();
+  } catch {
+    /* الصيانة مش شرط لنجاح الفحص */
+  }
+  const checks = [];
+  const distIndex = path.join(__dirname, "..", "dist", "index.html");
+  checks.push({
+    key: "app",
+    label: "ملفات البرنامج",
+    ok: fs.existsSync(distIndex),
+    detail: fs.existsSync(distIndex) ? "الواجهة موجودة داخل المثبّت" : "ملفات الواجهة ناقصة — أعد تثبيت البرنامج",
+  });
+
+  let writable = false;
+  try {
+    const probeFile = path.join(dirs.data, ".write-test");
+    fs.writeFileSync(probeFile, "ok");
+    fs.unlinkSync(probeFile);
+    writable = true;
+  } catch {
+    writable = false;
+  }
+  checks.push({
+    key: "storage",
+    label: "مساحة تخزين قابلة للكتابة",
+    ok: writable,
+    detail: writable ? dirs.data : "مش قادر يكتب في مجلد البيانات — شغّل البرنامج كمسؤول مرة واحدة",
+  });
+
+  const disk = freeDiskMb();
+  checks.push({
+    key: "disk",
+    label: "مساحة القرص",
+    ok: disk === null || disk > 500,
+    detail: disk === null ? "مش معروف" : `${disk} ميجا فاضية (المطلوب ٥٠٠ على الأقل)`,
+  });
+
+  const ramGb = Math.round((os.totalmem() / 1024 ** 3) * 10) / 10;
+  checks.push({
+    key: "ram",
+    label: "ذاكرة الجهاز",
+    ok: ramGb >= 4,
+    detail: `${ramGb} جيجا — ${ramGb >= 4 ? "مناسبة للنوافذ المتوازية" : "قليلة، البرنامج هيقلّل النوافذ تلقائيًا"}`,
+  });
+
+  checks.push({
+    key: "runtime",
+    label: "محرك التشغيل (Chromium + Node مدمج)",
+    ok: Boolean(process.versions.electron && process.versions.chrome),
+    detail: `Electron ${process.versions.electron} · Chromium ${process.versions.chrome} · Node ${process.versions.node}`,
+  });
+
+  let online = false;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(SEARCH_URL, { method: "HEAD", signal: controller.signal });
+    clearTimeout(timer);
+    online = res.ok || res.status < 500;
+  } catch {
+    online = false;
+  }
+  checks.push({
+    key: "network",
+    label: "الاتصال بـ نايس دير",
+    ok: online,
+    detail: online ? SEARCH_URL : "مفيش اتصال — اتأكد من الإنترنت أو الفلتر",
+  });
+
+  appendLog("info", `preflight: ${checks.filter((c) => c.ok).length}/${checks.length} ناجح`);
+  return { ok: checks.every((c) => c.ok), checks, dirs, info: systemInfo(), log: appLogPath };
+}
 
 // ---------------------------------------------------------------------------
 // أدوات تنفيذ في الصفحة
@@ -1157,6 +1373,125 @@ ipcMain.handle("nd:login", async (_e, payload) => {
   }
 });
 
+ipcMain.handle("app:preflight", async () => {
+  try {
+    return { ok: true, data: await preflight() };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+/**
+ * ٦٠) نسخة احتياطية يومية: الريندرر بيبعت الحالة كـ JSON، والملف بيتحفظ في
+ * مجلد بيانات البرنامج (مش مجلد التثبيت — عشان مثبّت لكل المستخدمين ما يمنعش الكتابة).
+ */
+ipcMain.handle("app:backup", async (_e, payload) => {
+  try {
+    const json = String(payload?.json || "");
+    if (!json) return { ok: false, error: "مفيش بيانات للنسخة الاحتياطية" };
+    const name = String(payload?.name || `rosheta-backup-${new Date().toISOString().slice(0, 10)}.json`).replace(
+      /[^\w.\-]/g,
+      "_",
+    );
+    const dir = backupDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    // كتابة آمنة: ملف مؤقت وبعدين إعادة تسمية (مايبوظش نسخة قديمة لو الجهاز قفل فجأة)
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, json, "utf8");
+    fs.renameSync(tmp, file);
+    appendLog("info", `backup: ${name} (${Math.round(json.length / 1024)} ك.ب)`);
+    try {
+      const backups = dirFiles(dir).sort((a, b) => b.mtime - a.mtime);
+      for (const f of backups.slice(7)) fs.rmSync(f.full, { force: true });
+    } catch {
+      /* تجاهل */
+    }
+    return { ok: true, data: { file, bytes: json.length } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle("app:maintenance", async (_e, payload) => {
+  try {
+    const action = payload?.action || "stats";
+    if (action === "prune") return { ok: true, data: pruneRuntime({ all: false }) };
+    if (action === "clear") return { ok: true, data: pruneRuntime({ all: true }) };
+    if (action === "open-logs") {
+      ensureRuntimeDirs();
+      const err = await shell.openPath(logsDir());
+      return err ? { ok: false, error: err } : { ok: true, data: { dir: logsDir() } };
+    }
+    if (action === "open-backups") {
+      ensureRuntimeDirs();
+      const err = await shell.openPath(backupDir());
+      return err ? { ok: false, error: err } : { ok: true, data: { dir: backupDir() } };
+    }
+    if (action === "open-diagnostics") {
+      ensureRuntimeDirs();
+      const err = await shell.openPath(diagDir());
+      return err ? { ok: false, error: err } : { ok: true, data: { dir: diagDir() } };
+    }
+    return {
+      ok: true,
+      data: {
+        logs: filesStats(logsDir()),
+        diagnostics: filesStats(diagDir()),
+        backups: filesStats(backupDir()),
+        retention: RETENTION_DAYS,
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+ipcMain.handle("nd:log", async (_e, payload) => {
+  appendLog(payload?.level || "info", payload?.msg || "");
+  return { ok: true };
+});
+
+/**
+ * ١١٩/١٢٠) فحص السلكتورات على الموقع الحقيقي.
+ * لو نايس دير غيّر صفحة، الفحص بيقول أي سلكتور اختفى — مش تخمين.
+ */
+ipcMain.handle("nd:probe", async () => {
+  try {
+    return await workers.with(async (win) => {
+      await ensureSearchPage(win, credentials);
+      const res = await run(win, S.PROBE_SELECTORS_SCRIPT);
+      if (!res) return { ok: false, error: "الصفحة لم ترد على الفحص" };
+      appendLog("warn", `probe: missing=${(res.missing || []).join(",") || "none"}`);
+      return { ok: true, data: res };
+    }, 60000);
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+/**
+ * ١١٨) لقطة HTML للتشخيص — بتتحفظ في مجلد diagnostics داخل بيانات البرنامج.
+ */
+let lastSearchWin = null;
+
+ipcMain.handle("nd:dump-html", async (_e, payload) => {
+  try {
+    const win = lastSearchWin && !lastSearchWin.isDestroyed() ? lastSearchWin : null;
+    const html = win ? await run(win, "document.documentElement.outerHTML") : "";
+    if (!html) return { ok: false, error: "مفيش صفحة مفتوحة لحفظها" };
+    const dir = diagDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = path.join(dir, `dump-${payload?.sab || "page"}-${stamp}.html`);
+    fs.writeFileSync(file, html, "utf8");
+    appendLog("warn", `dump-html: ${file}`);
+    return { ok: true, data: { file } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.handle("nd:status", async () => {
   try {
     return await workers.with(async (win) => {
@@ -1180,6 +1515,7 @@ ipcMain.handle("nd:search", async (_e, payload) => {
   const t0 = Date.now();
   try {
     return await workers.with(async (win) => {
+      lastSearchWin = win;
       await ensureSearchPage(win, credentials);
       // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
       const sessionState = await ensureSession(win, credentials);
@@ -1420,6 +1756,14 @@ function createMainWindow() {
 }
 
 app.whenReady().then(() => {
+  // البرنامج بيجهّز نفسه: مجلدات البيانات واللوج والتشخيص
+  ensureRuntimeDirs();
+  appendLog(
+    "info",
+    `بدء التشغيل — Roshetta Pro · Electron ${process.versions.electron} · ${os.platform()} ${os.arch()} · رام ${Math.round(os.totalmem() / 1024 ** 3)} جيجا · ${os.cpus()?.length || 0} أنوية`,
+  );
+  process.on("uncaughtException", (err) => appendLog("error", `uncaught: ${err?.stack || err}`));
+  process.on("unhandledRejection", (err) => appendLog("error", `unhandled: ${String(err)}`));
   session.fromPartition(ND_PARTITION).setUserAgent(UA);
   session.fromPartition(WA_PARTITION).setUserAgent(UA);
   createMainWindow();

@@ -20,6 +20,14 @@ contextBridge.exposeInMainWorld("roshetta", {
   retryDeletes: () => ipcRenderer.invoke("nd:retry-deletes"),
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
+  preflight: () => ipcRenderer.invoke("app:preflight"),
+  /** ٦٠) نسخة احتياطية يومية للحالة */
+  backup: (payload) => ipcRenderer.invoke("app:backup", payload),
+  /** ١٢٧) صيانة ملفات اللوج والتشخيص */
+  maintenance: (payload) => ipcRenderer.invoke("app:maintenance", payload),
+  probe: () => ipcRenderer.invoke("nd:probe"),
+  dumpHtml: (payload) => ipcRenderer.invoke("nd:dump-html", payload),
+  log: (payload) => ipcRenderer.invoke("nd:log", payload),
 
   // واتساب ويب
   wa: {

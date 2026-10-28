@@ -79,6 +79,10 @@ export interface CaseRecord {
 
   /** القرار البشري: الاستمارة بها دواء؟ */
   hasDrugs: Verdict;
+  /** تدوير الصورة (٠/٩٠/١٨٠/٢٧٠) — بيتحفظ مع الاستمارة */
+  rotation?: number;
+  /** أول يوم ظهرت فيه الاستمارة — أساس جلسة «الجديد فقط» */
+  firstSeen?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -227,9 +231,33 @@ export interface Settings {
   sendJitterPct: number;
   /** تصدير تقرير الجلسة تلقائيًا في آخر الجلسة */
   autoExport: boolean;
+  /** جلسة «الجديد فقط»: تجيب صور الاستمارات اللي ما كانتش موجودة قبل كده */
+  onlyNewForms: boolean;
+  /** وضع التشخيص: يحفظ HTML الصفحة عند فشل قراءة الجدول */
+  debugMode: boolean;
+  /** وضع الشاشة الصغيرة (لابتوب) — واجهة أضيق وأخف */
+  compactMode: boolean;
   lastReportDate: string;
   lastAutoSessionDate: string;
   lastScanAt: number;
+}
+
+/** إحصائيات ساعة كاملة — بتتبني على أسبوع وبتقول أفضل وقت للتشغيل */
+export interface HourStat {
+  count: number;
+  totalMs: number;
+}
+
+export interface Profile {
+  name: string;
+  workplace: string;
+  payerId: string;
+  payerName: string;
+  validityDays: number;
+  workerChoice: Settings["workerChoice"];
+  turboMode: boolean;
+  messageDrugs: string;
+  messageMonthly: string;
 }
 
 export interface BridgeResult<T = unknown> {
