@@ -239,27 +239,29 @@ export class SessionEngine {
       store.clearLog();
     }
 
-    // تجهيز القائمة: تنظيف + حذف مكرر + تخطي المتجرد النهاردة + الأثقل الأول
-    const prepared = preparePatients(patients, {
-      cache: useAppStore.getState().sabCache,
-      day: dateKey(),
-      force: opts.fresh,
-      // ٦٦) استكمال: مش بنعيد اللي خلص قبل الوقفة
-      resumeAfter: opts.fresh ? undefined : useAppStore.getState().session.lastSab || undefined,
-    });
-    // بعد ما استخدمنا الكاش في الترتيب والتخطي، بنمسح اللي مش من النهاردة
-    store.clearSabCache(dateKey());
-    if (!prepared.list.length) {
-      this.log("warn", `مفيش سابات محتاجة شغل. ${prepareNote(prepared.stats)}`);
-      activeEngine = null;
-      return;
-    }
-    const note = prepareNote(prepared.stats);
-    if (note) this.log("info", note);
-    patients = prepared.list;
-    this.missingCount = prepared.stats.missing;
-    if (this.missingCount) {
-      this.log("info", `${this.missingCount} ساب كان «غير موجود» النهاردة — اتخطى لتوفير الوقت.`);
+    // تجهيز القائمة بيخص الجرد بس (مرحلة الصور بتشتغل على الاستمارات المحفوظة)
+    if (doScan) {
+      const prepared = preparePatients(patients, {
+        cache: useAppStore.getState().sabCache,
+        day: dateKey(),
+        force: opts.fresh,
+        // ٦٦) استكمال: مش بنعيد اللي خلص قبل الوقفة
+        resumeAfter: opts.fresh ? undefined : useAppStore.getState().session.lastSab || undefined,
+      });
+      // بعد ما استخدمنا الكاش في الترتيب والتخطي، بنمسح اللي مش من النهاردة
+      store.clearSabCache(dateKey());
+      if (!prepared.list.length) {
+        this.log("warn", `مفيش سابات محتاجة شغل. ${prepareNote(prepared.stats)}`);
+        activeEngine = null;
+        return;
+      }
+      const note = prepareNote(prepared.stats);
+      if (note) this.log("info", note);
+      patients = prepared.list;
+      this.missingCount = prepared.stats.missing;
+      if (this.missingCount) {
+        this.log("info", `${this.missingCount} ساب كان «غير موجود» النهاردة — اتخطى لتوفير الوقت.`);
+      }
     }
 
     store.patchSession({
