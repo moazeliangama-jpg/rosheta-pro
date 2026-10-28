@@ -666,6 +666,60 @@ function labelWindow(win, text) {
   }
 }
 
+/**
+ * دليل حقيقي عند الفشل: صورة النافذة + HTML الصفحة زي ما هي لحظة الفشل.
+ *
+ * ليه؟ لأن «الخطوات مش بتتعمل» مش معلومة؛ المعلومة هي **الصفحة اللي كانت مفتوحة**
+ * (هل هي صفحة البحث؟ صفحة دخول؟ رسالة رفض؟). الدليل بيتحفظ في مجلد
+ * `diagnostics` ومساره بيرجع مع رسالة الفشل نفسها — مفيش طلب لوجات من المستخدم.
+ * مفيش أي بيانات دخول في الملف: قيم الـinput مش بتتحول لـattribute، والسكربتات
+ * بتتشال، والحجم بيتقص.
+ */
+const EVIDENCE_HTML_SCRIPT = `(() => {
+  try {
+    const clone = document.documentElement.cloneNode(true);
+    clone.querySelectorAll('script, iframe, link[rel="preload"]').forEach((el) => el.remove());
+    clone.querySelectorAll('input, textarea').forEach((el) => {
+      el.removeAttribute('value');
+      el.textContent = '';
+      el.setAttribute('data-rp-redacted', '1');
+    });
+    return clone.outerHTML.slice(0, 400000);
+  } catch (e) {
+    return '';
+  }
+})()`;
+
+async function saveWindowEvidence(win, tag) {
+  if (!win || win.isDestroyed()) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeTag = String(tag || "page")
+    .replace(/[^\w.-]+/g, "-")
+    .slice(0, 40);
+  const base = path.join(diagDir(), `${safeTag}-${stamp}`);
+  const files = {};
+  try {
+    const html = await run(win, EVIDENCE_HTML_SCRIPT);
+    if (html && html.length > 200) {
+      fs.writeFileSync(`${base}.html`, html);
+      files.html = `${base}.html`;
+    }
+  } catch {
+    /* الدليل مش حرج للتنفيذ */
+  }
+  try {
+    ensurePaintable(win);
+    const img = await win.webContents.capturePage();
+    if (img && !img.isEmpty()) {
+      fs.writeFileSync(`${base}.png`, img.toPNG());
+      files.png = `${base}.png`;
+    }
+  } catch {
+    /* تجاهل */
+  }
+  return Object.keys(files).length ? files : null;
+}
+
 /** قبل اللقطة: نتأكد إن النافذة بترسم فعلًا */
 function ensurePaintable(win) {
   if (!win || win.isDestroyed()) return;
@@ -2658,6 +2712,8 @@ ipcMain.handle("nd:probe", async () => {
  * ١١٨) لقطة HTML للتشخيص — بتتحفظ في مجلد diagnostics داخل بيانات البرنامج.
  */
 let lastSearchWin = null;
+/** آخر نافذة جلب صور — عشان دليل الفشل يتاخد من النافذة الصح */
+let lastImageWin = null;
 
 ipcMain.handle("nd:dump-html", async (_e, payload) => {
   try {
@@ -2715,6 +2771,14 @@ ipcMain.handle("nd:search", async (_e, payload) => {
           await loginOnce(win, credentials);
           await ensureSearchPage(win, credentials);
           res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+        } else if (err && err.code === "PRECONDITION") {
+          // النافذة مش على صفحة البحث (صفحة قديمة/مودال/تحويل) — تحميل جديد
+          // وإعادة المحاولة مرة واحدة بدل ما الساب يفشل على صفحة غلط.
+          traceStep(`الساب ${sab}: النافذة مش على صفحة البحث — تحميل جديد ومحاولة تانية`);
+          await safeLoad(win, SEARCH_URL, TIMEOUTS.pageLoad);
+          const ready = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+          if (!ready) throw err;
+          res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
         } else {
           throw err;
         }
@@ -2722,7 +2786,10 @@ ipcMain.handle("nd:search", async (_e, payload) => {
       return { ok: true, data: res, session: sessionState, ms: Date.now() - t0 };
     });
   } catch (err) {
-    return { ok: false, error: String(err?.message || err), ms: Date.now() - t0 };
+    // فشل البحث: بنحفظ الصفحة اللي كانت مفتوحة فعلًا (صورة + HTML) ونرفق مسارها
+    const evidence = await saveWindowEvidence(lastSearchWin, `search-${SEC.sanitizeSab(sab) || "sab"}`);
+    const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
+    return { ok: false, error: `${String(err?.message || err)}${files}`, ms: Date.now() - t0, files: evidence };
   }
 });
 
@@ -2732,21 +2799,25 @@ ipcMain.handle("nd:form-image", async (_e, payload) => {
   try {
     return await workers.withPref(
       (win) => win.__rpSab === sab,
-      (win) =>
-      processForm(win, {
+      (win) => {
+        lastImageWin = win;
+        return processForm(win, {
         sab,
         reference,
         source,
         href,
         payerId,
         payerName,
-        preventDelete: Boolean(preventDelete),
-        credentials,
-      }),
+          preventDelete: Boolean(preventDelete),
+          credentials,
+        });
+      },
       6000,
     );
   } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
+    const evidence = await saveWindowEvidence(lastImageWin, `image-${SEC.sanitizeSab(sab) || "sab"}`);
+    const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
+    return { ok: false, error: `${String(err?.message || err)}${files}`, files: evidence };
   }
 });
 
