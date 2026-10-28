@@ -1,4 +1,4 @@
-import { loadImage } from "./imageStore";
+import { hasImage, loadImage } from "./imageStore";
 
 /**
  * كاش صور في الذاكرة بحجم محدود.
@@ -54,6 +54,16 @@ export async function getImage(id: string): Promise<string | null> {
   } finally {
     pending.delete(id);
   }
+}
+
+/**
+ * الصورة متاحة للعرض؟ (في الكاش أو في IndexedDB)
+ * بعد إعادة تشغيل البرنامج الحالة المحفوظة مش فيها dataUrl — الصورة في IndexedDB.
+ * من غير الفحص ده أي واجهة بتقرأ الحالة بس بتفتكر إن الصور ضاعت.
+ */
+export async function imageAvailable(id: string): Promise<boolean> {
+  if (getCachedImage(id)) return true;
+  return hasImage(id);
 }
 
 export function evictImage(id: string) {

@@ -1621,8 +1621,10 @@ async function captureScreenshot(win, { forceVisible = false } = {}) {
   } finally {
     if (shown) {
       try {
-        win.hide();
         if (original) win.setBounds(original);
+        // النافذة بترجع للخلفية (مرئية من غير تركيز) مش بتتقفل تمامًا —
+        // الإخفاء الكامل بيمنع الرسم في اللقطات اللي بعدها
+        presentInBackground(win, 0);
       } catch {
         /* تجاهل */
       }
