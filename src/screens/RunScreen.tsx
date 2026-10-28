@@ -179,6 +179,12 @@ export function RunScreen({
           <Badge tone="warn">خارج المدة: {stats.invalid}</Badge>
           <Badge tone={stats.failed ? "bad" : "ok"}>متعثرة: {stats.failed}</Badge>
         </div>
+
+        {session.cancelStoppedDeletes ? (
+          <div className="mt-2 rounded-lg border border-amber-500/25 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-200/80">
+            العملية اتلغت — اتلغى {session.cancelStoppedDeletes} إرجاع لسه ما اتنفذش، فمفيش أي حذف حصل.
+          </div>
+        ) : null}
       </Card>
 
       {/* الأحداث المباشرة: اللي بيحصل فعلًا جوه نوافذ نايس دير */}
