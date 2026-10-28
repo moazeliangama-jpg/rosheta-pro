@@ -33,6 +33,7 @@ const { parseDateToISO, isMonthlyText } = require("./nice-utils.cjs");
 const SEC = require("./security.cjs");
 const UPD = require("./updates.cjs");
 const BUG = require("./bugreport.cjs");
+const RX = require("./rx-page.cjs");
 
 const BASE = "https://nicedeer.net";
 const LOGIN_URL = `${BASE}/Account/Login`;
@@ -772,7 +773,13 @@ class WindowPool {
 }
 
 const workers = new WindowPool({ name: "workers", max: Math.min(5, MAX_WORKERS), keepState: true });
-const captures = new WindowPool({ name: "captures", max: Math.min(4, MAX_WORKERS), keepState: false });
+// نوافذ التقاط: الصور مسموحة فيها (كانت محجوبة → الصورة ماكانتش بتظهر خالص)
+const captures = new WindowPool({
+  name: "captures",
+  max: Math.min(4, MAX_WORKERS),
+  keepState: false,
+  blockImages: false,
+});
 
 // كل دقيقة: اقفل النوافذ الخاملة اللي مش مستخدمة من دقيقتين (تحرير رام)
 setInterval(() => {
@@ -887,14 +894,22 @@ let loginPromise = null;
 
 async function loginOnce(win, creds) {
   if (loginPromise) {
-    await loginPromise.catch(() => {});
-    return "shared";
+    // نافذة تانية بتسجّل الدخول دلوقتي — بنستنى نفس الوعد ونستفيد من الكوكيز المشتركة
+    const shared = await loginPromise.catch(() => null);
+    if (!shared || !shared.ok) {
+      throw new Error(
+        shared && shared.message
+          ? String(shared.message)
+          : "محاولة الدخول من نافذة تانية فشلت — جرّب «اختبار الدخول» تاني",
+      );
+    }
+    return { ok: true, already: true, shared: true };
   }
   loginPromise = login(win, creds).finally(() => {
     loginPromise = null;
   });
-  await loginPromise;
-  return "logged-in";
+  const res = await loginPromise;
+  return res || { ok: true };
 }
 
 /** هل الجلسة لسه شغالة؟ لو اتحوّلت لصفحة الدخول بندخل تاني مرة واحدة */
@@ -909,14 +924,79 @@ async function ensureSession(win, creds) {
   return "relogin";
 }
 
+/** قراءة حالة صفحة الدخول وتصنيفها (فورم / داخل / تحقق بشري / رسالة رفض) */
+async function probeLogin(win) {
+  if (!win || win.isDestroyed()) return null;
+  const raw = await run(win, S.LOGIN_PROBE_SCRIPT);
+  if (!raw) return null;
+  raw.errorText = RX.pickLoginError(raw.errorText);
+  const verdict = RX.classifyLoginPage(raw);
+  return { ...raw, state: verdict.state, message: verdict.message };
+}
+
+/** يستنى لحد ما الصفحة توصل لحالة معيّنة، وبيرجّع آخر قراءة على أي حال */
+async function waitLoginState(win, wanted, timeoutMs) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await probeLogin(win);
+    if (last && wanted.includes(last.state)) return last;
+    const loading = (() => {
+      try {
+        return win.webContents.isLoadingMainFrame();
+      } catch {
+        return false;
+      }
+    })();
+    await sleep(loading ? 200 : 150);
+  }
+  return last;
+}
+
+/** الدليل النهائي: هل صفحة البحث بتفتح فعلًا؟ (مش بس العنوان اتغيّر) */
+async function verifySessionBySearchPage(win) {
+  await safeLoad(win, SEARCH_URL, TIMEOUTS.login);
+  const ok = await run(win, S.waitForSelectorScript("#SearchCode", 12000));
+  return Boolean(ok);
+}
+
 async function login(win, credentials) {
   if (!credentials.username || !credentials.password) {
     throw new Error("بيانات دخول نايس دير غير محفوظة — اكتب اليوزر والباسورد في الإعداد");
   }
 
-  await safeLoad(win, LOGIN_URL);
-  const ready = await run(win, S.waitForSelectorScript("#UserName", TIMEOUTS.login));
-  if (!ready) throw new Error("صفحة تسجيل الدخول لم تظهر (#UserName)");
+  await safeLoad(win, LOGIN_URL, TIMEOUTS.login);
+
+  // ممكن تكون الجلسة شغالة أصلًا — نايس دير بيفضل مسجّل. منكتبش البيانات على الفاضي.
+  let probe = await waitLoginState(win, ["form", "logged-in", "challenge", "error"], TIMEOUTS.login);
+  if (!probe) throw new Error("صفحة تسجيل الدخول لم تفتح — الشبكة أو الموقع مش متاح");
+
+  if (probe.state === "logged-in") {
+    win.__rpReady = true;
+    return { ok: true, already: true };
+  }
+
+  // تحقق Cloudflare بيمرّ لوحده — بنستناه بدل ما نفشل على طول
+  if (probe.state === "challenge") {
+    probe = await waitLoginState(win, ["form", "logged-in"], 25000);
+    if (probe && probe.state === "logged-in") {
+      win.__rpReady = true;
+      return { ok: true, already: true };
+    }
+    if (!probe || probe.state === "challenge") {
+      throw new Error(
+        "نايس دير عارض تحقق بشري (Cloudflare) — افتح «الموقع في المتصفح»، عدّي التحقق، وبعدين جرّب تاني",
+      );
+    }
+  }
+
+  if (probe.state === "error" && probe.errorText) {
+    throw new Error(`نايس دير رفض من غير محاولة دخول: ${probe.errorText}`);
+  }
+
+  if (!probe.hasUser || !probe.hasPass) {
+    throw new Error("خانات تسجيل الدخول مش موجودة في الصفحة (#UserName / #passwordInput)");
+  }
 
   const filled = await run(
     win,
@@ -936,9 +1016,9 @@ async function login(win, credentials) {
       return a && b;
     })()`,
   );
-  if (!filled) throw new Error("خانات تسجيل الدخول غير موجودة (#UserName / #passwordInput)");
+  if (!filled) throw new Error("تعذّر كتابة بيانات الدخول في الخانات (#UserName / #passwordInput)");
 
-  await run(
+  const clicked = await run(
     win,
     `(() => {
       const btn = document.querySelector('#loginBTN') || [...document.querySelectorAll('button')].find((b) => /log\\s*in/i.test(b.textContent || ''));
@@ -947,29 +1027,42 @@ async function login(win, credentials) {
       return true;
     })()`,
   );
+  if (!clicked) throw new Error("زرار الدخول (#loginBTN) مش موجود في الصفحة");
 
-  const started = Date.now();
-  let ok = false;
-  while (Date.now() - started < TIMEOUTS.login) {
-    const url = win.webContents.getURL() || "";
-    if (url && !url.includes("/Account/Login")) {
-      ok = true;
-      break;
+  // بعد الضغط: نجاح / رسالة رفض / تحقق بشري
+  probe = await waitLoginState(win, ["logged-in", "error", "challenge"], TIMEOUTS.login);
+
+  if (probe && probe.state === "logged-in") {
+    win.__rpReady = true;
+    return { ok: true, already: false };
+  }
+
+  if (probe && probe.state === "challenge") {
+    probe = await waitLoginState(win, ["logged-in", "form"], 20000);
+    if (probe && probe.state === "logged-in") {
+      win.__rpReady = true;
+      return { ok: true, already: false };
     }
-    await sleep(120);
+    if (probe && probe.state === "form") {
+      throw new Error(
+        "نايس دير عرض تحقق بشري قبل قبول الدخول — عدّي التحقق من «الموقع في المتصفح» وجرّب تاني",
+      );
+    }
+    throw new Error("نايس دير عارض تحقق بشري (Cloudflare) — الدخول لم يُقيَّم أصلًا");
   }
-  if (!ok) {
-    const err = await run(
-      win,
-      `(() => {
-        const el = document.querySelector('.validation-summary-errors, .alert-danger, .text-danger, .field-validation-error');
-        return el ? (el.textContent || '').trim() : '';
-      })()`,
-    );
-    throw new Error(err ? `رفض نايس دير الدخول: ${err}` : "تسجيل الدخول لم يكتمل — تحقق من اليوزر والباسورد");
+
+  if (probe && probe.errorText) {
+    throw new Error(`نايس دير رفض الدخول: ${probe.errorText}`);
   }
-  win.__rpReady = true;
-  return true;
+
+  // الصفحة ممكن تكون سايبة الفورم من غير ما العنوان يتغيّر — الدليل هو صفحة البحث
+  if (await verifySessionBySearchPage(win)) {
+    win.__rpReady = true;
+    return { ok: true, already: false };
+  }
+
+  const snippet = probe && probe.bodySnippet ? ` — آخر ما ظهر في الصفحة: ${probe.bodySnippet.slice(0, 120)}` : "";
+  throw new Error(`الدخول لم يكتمل: ${probe ? probe.message : "الصفحة مش بتستجيب"}${snippet}`);
 }
 
 /** يضمن إن النافذة على صفحة البحث (بيستخدم كاش عشان ما يدفعش تكلفة كل مرة) */
@@ -1064,43 +1157,244 @@ async function ensureResults(win, { sab, payerId, payerName, needReference }) {
 // التقاط الصورة
 // ---------------------------------------------------------------------------
 
-async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide = 180 } = {}) {
+/**
+ * سجل التقاط الصور: سطر واحد لكل محاولة، في logs/capture.log.
+ * موجود عشان أي «الصورة مش ظاهرة» يبقى ليها سبب مكتوب مش تخمين.
+ */
+function capLog(ref, message) {
+  const line = `[${new Date().toISOString()}] ${ref} :: ${message}\n`;
+  try {
+    fs.mkdirSync(logsDir(), { recursive: true });
+    const file = path.join(logsDir(), "capture.log");
+    try {
+      const st = fs.statSync(file);
+      if (st.size > 2 * 1024 * 1024) fs.writeFileSync(file, "");
+    } catch {
+      /* الملف مش موجود بعد */
+    }
+    fs.appendFileSync(file, line);
+  } catch {
+    /* السجل مش حرج */
+  }
+}
+
+/**
+ * جلب صورة الروشتة من الشبكة بنفس كوكيز الجلسة.
+ *
+ * ليه؟ لأن صفحة الروشتة مش مضمون إنها فيها <img> نقدر نرسمها على canvas
+ * (ممكن تكون viewer أو PDF أو الصورة بتتحمّل بـXHR). هنا بنجيب نفس الرابط
+ * اللي اتفتح، ولو رجع HTML بنستخرج منه مصادر الصور ونحاول تاني.
+ */
+async function fetchSource(win, url, { referrer } = {}) {
+  // ١) جوّه الصفحة: نفس الأصل ⇒ نفس الكوكيز والـreferer ومن غير CORS
+  if (win && !win.isDestroyed()) {
+    let sameOrigin = false;
+    try {
+      const here = new URL(win.webContents.getURL());
+      const there = new URL(url);
+      sameOrigin = here.origin === there.origin;
+    } catch {
+      sameOrigin = false;
+    }
+    if (sameOrigin) {
+      const inPage = await run(win, S.FETCH_IN_PAGE_SCRIPT(url));
+      if (inPage && !inPage.failed) return { ...inPage, via: "page" };
+      if (inPage && inPage.failed) capLog("net", `fetch جوه الصفحة فشل: ${inPage.reason}`);
+    }
+  }
+
+  // ٢) طبقة الشبكة في نفس الجلسة (بتشتغل مع مضيفين تانيين)
+  try {
+    const ses = session.fromPartition(ND_PARTITION);
+    if (typeof ses.fetch !== "function") return null;
+    const res = await ses.fetch(url, {
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "User-Agent": UA,
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        ...(referrer ? { Referer: referrer } : {}),
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res || !res.ok) return null;
+    const type = String(res.headers.get("content-type") || "").toLowerCase();
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (!buf.length) return null;
+    if (RX.isDisplayableImageType(type)) {
+      return {
+        type,
+        size: buf.length,
+        dataUrl: `data:${type.split(";")[0].trim()};base64,${buf.toString("base64")}`,
+        via: "session",
+      };
+    }
+    if (RX.isPdfType(type)) return { type, size: buf.length, pdf: true, via: "session" };
+    return { type, size: buf.length, text: buf.toString("utf8").slice(0, 400000), via: "session" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * جلب صورة الروشتة من الشبكة بنفس جلسة نايس دير.
+ *
+ * لو الرابط رجّع صفحة HTML (زي صفحة `PrescriptionImgs`)، بنستخرج منها مصادر
+ * الصور بـ`RX.extractImageUrls` ونجرّبها بالترتيب — لأن الصورة الحقيقية غالبًا
+ * جوه `<img>` في الصفحة دي، مش الصفحة نفسها.
+ */
+async function fetchImageViaSession(win, url, { referrer, depth = 0 } = {}) {
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const got = await fetchSource(win, url, { referrer });
+  if (!got) return null;
+
+  if (got.dataUrl && RX.isDisplayableImageType(got.type)) {
+    return {
+      dataUrl: got.dataUrl,
+      method: `${got.via}-fetch${depth ? "-nested" : ""}`,
+      src: url,
+      bytes: got.size,
+    };
+  }
+  if (got.pdf) return { none: true, lookedLikePdf: true, src: url, candidates: [] };
+  if (!got.text || depth > 0) return null;
+
+  const candidates = RX.extractImageUrls(got.text, url);
+  const inline = candidates.find((u) => u.startsWith("data:image/"));
+  if (inline) return { dataUrl: inline, method: "html-inline", src: url };
+
+  for (const candidate of candidates.filter((u) => !u.startsWith("data:")).slice(0, 5)) {
+    const nested = await fetchImageViaSession(win, candidate, { referrer: url, depth: 1 });
+    if (nested && nested.dataUrl) return nested;
+  }
+  return { none: true, candidates, lookedLikePdf: RX.looksLikePdfViewer(got.text), src: url };
+}
+
+/**
+ * لقطة شاشة للنافذة — بترفض اللقطة البيضاء، ولو النافذة مخفية ومش بترسم
+ * بتظهر برّه الشاشة وتلقط تاني (Chromium مابيرسمش دايماً لنافذة مخفية).
+ */
+async function captureScreenshot(win, { forceVisible = false } = {}) {
+  if (!win || win.isDestroyed()) return null;
+
+  const shoot = async () => {
+    try {
+      if (win.isDestroyed()) return null;
+      const img = await win.webContents.capturePage();
+      if (!img || img.isEmpty()) return null;
+
+      // الفحص الحقيقي: بكسلات الصفحة نفسها (صفحة بيضاء = لقطة فاضية)
+      let bitmapBlank = false;
+      try {
+        bitmapBlank = RX.isBlankBitmap(img.getBitmap());
+      } catch {
+        bitmapBlank = false;
+      }
+
+      const resized = img.getSize().width > 1600 ? img.resize({ width: 1600, quality: "best" }) : img;
+      const jpg = resized.toJPEG(82);
+      if (jpg && jpg.length && !bitmapBlank) {
+        return { dataUrl: `data:image/jpeg;base64,${jpg.toString("base64")}`, method: "screenshot-jpeg" };
+      }
+      const png = resized.toPNG();
+      if (!png || !png.length || RX.isLikelyBlankShot(png.length) || bitmapBlank) return null;
+      return { dataUrl: `data:image/png;base64,${png.toString("base64")}`, method: "screenshot" };
+    } catch {
+      return null;
+    }
+  };
+
+  const first = await shoot();
+  if (first || !forceVisible) return first;
+
+  // نافذة مخفية مابتعملش paint في بعض الحالات → نعرضها بعيد عن الشاشة وبنلقط
+  let shown = false;
+  let original = null;
+  try {
+    original = win.getBounds();
+    win.setBounds({
+      x: -4000,
+      y: 0,
+      width: Math.max(original.width || 1000, 1000),
+      height: Math.max(original.height || 800, 800),
+    });
+    win.showInactive();
+    shown = true;
+    await sleep(500);
+  } catch {
+    /* لو مش قادر يعرضها، بنكمل باللقطة العادية */
+  }
+  try {
+    return await shoot();
+  } finally {
+    if (shown) {
+      try {
+        win.hide();
+        if (original) win.setBounds(original);
+      } catch {
+        /* تجاهل */
+      }
+    }
+  }
+}
+
+/**
+ * التقاط صورة الروشتة بثلاث مراحل:
+ *   ١) من الـDOM (img / canvas / iframe) — الطريقة الأساسية والأنضف.
+ *   ٢) من الشبكة بنفس الكوكيز — بتنجح لما الصورة مش قابلة للرسم على canvas.
+ *   ٣) لقطة شاشة (مع إظهار النافذة بعيد عن الشاشة لو مخفية).
+ */
+async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide = 180, allowVisible = true } = {}) {
   if (!win || win.isDestroyed()) return null;
   const started = Date.now();
+  const diag = { stage: "dom", attempts: 0 };
 
-  // بنحاول نلقط فورًا — الصورة ممكن تكون ظهرت قبل ما الصفحة تخلص تحميل،
-  // ولو الصفحة لسه بتتنقل بنعيد المحاولة بسرعة بدل ما نستنى حدث التحميل.
-  while (Date.now() - started < timeoutMs + 2500) {
-    if (!win || win.isDestroyed()) return null;
-    const remaining = Math.max(1200, timeoutMs - (Date.now() - started));
+  // مرحلة ١: الـDOM
+  while (Date.now() - started < timeoutMs) {
+    if (!win || win.isDestroyed()) break;
+    const remaining = Math.max(1500, timeoutMs - (Date.now() - started));
+    diag.attempts += 1;
     const res = await run(win, S.captureImageScript({ timeoutMs: remaining, minSide }));
-    if (res && res.dataUrl) return res;
+    if (res && res.diag) diag.last = res.diag;
+    if (res && res.dataUrl) return { ...res, diag };
     if (res && res.failed) {
-      if (res.reason === "protected") break;
-      if (!win.webContents.isLoadingMainFrame()) break;
+      diag.reason = res.reason;
+      if (res.reason === "protected" || res.reason === "pdf-embed") break;
+      let loading = false;
+      try {
+        loading = win.webContents.isLoadingMainFrame();
+      } catch {
+        loading = false;
+      }
+      if (!loading) break;
     }
-    await sleep(50);
+    await sleep(60);
   }
 
-  // صورة محمية (tainted) — بنصور النافذة نفسها
-  try {
-    const shot = await win.webContents.capturePage();
-    if (shot && !shot.isEmpty()) {
-      // تصغير لقطة الشاشة — أسرع وأخف على التخزين مع نفس الوضوح
-      const resized = shot.getSize().width > 1600
-        ? shot.resize({ width: 1600, quality: "best" })
-        : shot;
-      // ٢١) JPEG بدل PNG: نفس الوضوح للصفحة، وحجم أقل بحوالي ٥–٨ أضعاف
-      const jpg = resized.toJPEG(82);
-      const dataUrl = jpg && jpg.length
-        ? `data:image/jpeg;base64,${jpg.toString("base64")}`
-        : `data:image/png;base64,${resized.toPNG().toString("base64")}`;
-      return { dataUrl, method: jpg && jpg.length ? "screenshot-jpeg" : "screenshot", ms: 0 };
-    }
-  } catch {
-    /* تجاهل */
+  // نفس المحاولة بحد أدنى أصغر (روشتة صغيرة أو صورة مصغّرة)
+  if (minSide > 80) {
+    const relaxed = await run(win, S.captureImageScript({ timeoutMs: 2500, minSide: 80 }));
+    if (relaxed && relaxed.dataUrl) return { ...relaxed, diag: { ...diag, relaxed: true } };
   }
-  return null;
+
+  // مرحلة ٢: الشبكة
+  diag.stage = "network";
+  let pageUrl = "";
+  try {
+    pageUrl = win.webContents.getURL() || "";
+  } catch {
+    pageUrl = "";
+  }
+  const net = await fetchImageViaSession(win, pageUrl);
+  if (net && net.dataUrl) return { ...net, diag };
+  if (net && net.candidates) diag.candidates = net.candidates.slice(0, 5);
+
+  // مرحلة ٣: لقطة شاشة
+  diag.stage = "screenshot";
+  const shot = await captureScreenshot(win, { forceVisible: allowVisible });
+  if (shot) return { ...shot, diag };
+
+  return { failed: true, reason: diag.reason || "unknown", diag, pageUrl };
 }
 
 /**
@@ -1108,29 +1402,50 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
  * النافذة بتتخلق بواسطة Electron نفسها (allow + override) وبتتلقط فورًا،
  * فمفيش تكلفة إنشاء نافذة إضافية ولا انتظار ثابت.
  */
-function armPopupCapture(win) {
+function armPopupCapture(win, ref = "") {
   const urls = [];
+  let settled = false;
   let resolveChild;
   const childPromise = new Promise((resolve) => {
     resolveChild = resolve;
   });
+  const settle = (value) => {
+    if (settled) return;
+    settled = true;
+    resolveChild(value);
+  };
 
   win.webContents.setWindowOpenHandler(({ url }) => {
     urls.push(url);
+    capLog(ref, `نافذة صورة مطلوبة: ${String(url).slice(0, 160)}`);
     return {
       action: "allow",
       overrideBrowserWindowOptions: hiddenWindowOptions({ show: false }),
     };
   });
 
+  const grab = async (target, label) => {
+    if (!target || target.isDestroyed()) return null;
+    try {
+      const image = await captureImageInWindow(target, { timeoutMs: TIMEOUTS.image });
+      const ok = Boolean(image && image.dataUrl);
+      capLog(
+        ref,
+        `${label}: ${ok ? `نجح (${image.method}) ${Math.round((image.diag?.ms ?? 0))}ms` : `فشل (${image?.reason || image?.diag?.reason || "بلا سبب"})`}`,
+      );
+      return ok ? image : null;
+    } catch (err) {
+      capLog(ref, `${label}: استثناء ${String(err?.message || err).slice(0, 120)}`);
+      return null;
+    }
+  };
+
   const onChild = (child) => {
     child.webContents.setUserAgent(UA);
     void (async () => {
       try {
-        const image = await captureImageInWindow(child, { timeoutMs: TIMEOUTS.image });
-        resolveChild(image);
-      } catch {
-        resolveChild(null);
+        const image = await grab(child, "نافذة منبثقة");
+        if (image) settle(image);
       } finally {
         if (!child.isDestroyed()) child.destroy();
       }
@@ -1142,6 +1457,36 @@ function armPopupCapture(win) {
   return {
     urls,
     childPromise,
+    settle,
+    /** نافذة صورة مفتوحة من محاولة سابقة (أو من المستخدم) — بنلقطها بدل ما نفتح جديدة */
+    async adoptExisting() {
+      if (settled) return null;
+      const self = win.id;
+      const candidates = BrowserWindow.getAllWindows().filter((w) => {
+        if (!w || w.isDestroyed() || w.id === self) return false;
+        try {
+          const url = w.webContents.getURL() || "";
+          return /PrescriptionImgs|Prescription|Beneficiary\/Prescription/i.test(url);
+        } catch {
+          return false;
+        }
+      });
+      if (!candidates.length) return null;
+      capLog(ref, `لقيت ${candidates.length} نافذة صورة مفتوحة مسبقًا — بلقطها`);
+      for (const candidate of candidates) {
+        const image = await grab(candidate, "نافذة مفتوحة مسبقًا");
+        try {
+          if (!candidate.isDestroyed()) candidate.destroy();
+        } catch {
+          /* تجاهل */
+        }
+        if (image) {
+          settle(image);
+          return image;
+        }
+      }
+      return null;
+    },
     dispose() {
       win.webContents.off("did-create-window", onChild);
       if (!win.isDestroyed()) win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
@@ -1150,11 +1495,24 @@ function armPopupCapture(win) {
 }
 
 /** يفتح رابط صورة في نافذة التقاط معاد استخدامها */
-async function captureFromUrl(url, referrer) {
+async function captureFromUrl(url, referrer, ref = "") {
   return captures.with(async (win) => {
+    let shot = null;
     const loaded = await safeLoad(win, url, TIMEOUTS.pageLoad, referrer);
-    if (loaded === "error") return null;
-    return captureImageInWindow(win, { timeoutMs: TIMEOUTS.image });
+    if (loaded !== "error") {
+      shot = await captureImageInWindow(win, { timeoutMs: TIMEOUTS.image });
+      if (shot && shot.dataUrl) {
+        capLog(ref, `نافذة التقاط مباشرة: نجح (${shot.method})`);
+        return shot;
+      }
+    }
+    const net = await fetchImageViaSession(win, url, { referrer });
+    if (net && net.dataUrl) {
+      capLog(ref, `جلب مباشر من الشبكة: نجح (${net.method})`);
+      return net;
+    }
+    capLog(ref, `جلب مباشر: فشل (${shot?.reason || net?.reason || "مفيش مصدر"})`);
+    return null;
   }, 40000);
 }
 
@@ -1191,40 +1549,73 @@ async function processForm(win, job) {
 
   // صفحة الروشتة محتاجة صور — نسمح بيها في النافذة دي بس
   setResourceMode(win, "images");
-  const popup = armPopupCapture(win);
-  let clicked = "";
+  const ref = `${sab}::${reference}`;
+  const popup = armPopupCapture(win, ref);
+  const tried = [];
   try {
-    clicked = await runStrict(win, S.clickReferenceScript(reference));
-    if (!clicked) {
-      return { ok: false, error: `الرقم المرجعي ${reference} غير موجود في الصفحة`, timings };
+    // نافذة صورة مفتوحة من محاولة سابقة/من المستخدم: بنلقطها بدل ما نضغط تاني
+    let image = await popup.adoptExisting();
+
+    if (!image) {
+      const clicked = await runStrict(win, S.clickReferenceScript(reference));
+      if (!clicked) {
+        return { ok: false, error: `الرقم المرجعي ${reference} غير موجود في الصفحة`, timings };
+      }
+      capLog(ref, `تم الضغط على الرقم المرجعي (${clicked})`);
+      timings.clickMs = Date.now() - t0 - (timings.searchMs || 0);
+
+      // مساران بالتوازي: نافذة الصورة المنبثقة، أو تنقّل الصفحة نفسها
+      const mainPromise = (async () => {
+        const nav = await new Promise((resolve) => {
+          const started = Date.now();
+          const tick = () => {
+            if (navigatedTo) return resolve(navigatedTo);
+            if (Date.now() - started > 600) return resolve(null);
+            setTimeout(tick, 25);
+          };
+          tick();
+        });
+        if (!nav || win.isDestroyed()) return null;
+        await waitForLoad(win, 12000);
+        return captureImageInWindow(win, { timeoutMs: 6000 });
+      })();
+
+      image = await firstSuccess([popup.childPromise, mainPromise], TIMEOUTS.image + 4000);
+      if (image) capLog(ref, `الصورة اتجابت من نافذة/تنقّل (${image.method || "؟"})`);
     }
-    timings.clickMs = Date.now() - t0 - (timings.searchMs || 0);
 
-    // مساران بالتوازي: نافذة الصورة المنبثقة، أو تنقّل الصفحة نفسها
-    const mainPromise = (async () => {
-      // بنستنى التنقل 600 مللي — لو مفيش تنقل مفيش داعي نضيّع وقت في الصفحة الحالية
-      const nav = await new Promise((resolve) => {
-        const started = Date.now();
-        const tick = () => {
-          if (navigatedTo) return resolve(navigatedTo);
-          if (Date.now() - started > 600) return resolve(null);
-          setTimeout(tick, 25);
-        };
-        tick();
-      });
-      if (!nav || win.isDestroyed()) return null;
-      await waitForLoad(win, 12000);
-      return captureImageInWindow(win, { timeoutMs: 6000 });
-    })();
-
-    let image = await firstSuccess([popup.childPromise, mainPromise], TIMEOUTS.image + 4000);
+    // شبكة: نفس الجلسة والكوكيز — بتنجح لما الصفحة نفسها مش قابلة للرسم
+    if (!image || !image.dataUrl) {
+      const candidates = [];
+      if (navigatedTo) candidates.push(navigatedTo);
+      for (const url of popup.urls) candidates.push(url);
+      try {
+        const current = win.webContents.getURL();
+        if (current) candidates.push(current);
+      } catch {
+        /* تجاهل */
+      }
+      for (const url of candidates.slice(0, 4)) {
+        if (!/^https?:\/\//i.test(url)) continue;
+        if (tried.includes(url)) continue;
+        tried.push(url);
+        const net = await fetchImageViaSession(win, url, { referrer: SEARCH_URL });
+        if (net && net.dataUrl) {
+          image = net;
+          notes.push("جلب الصورة من الشبكة");
+          capLog(ref, `شبكة: نجح (${net.method})`);
+          break;
+        }
+        capLog(ref, `شبكة: فشل ${String(url).slice(0, 120)}`);
+      }
+    }
 
     // خطة أخيرة: رابط صورة داخل الصفحة نفسها
-    if (!image) {
+    if (!image && !win.isDestroyed()) {
       const link = await run(win, S.FIND_IMAGE_LINK_SCRIPT);
       if (link && link !== "click") {
         const abs = link.startsWith("http") ? link : `${BASE}${link}`;
-        image = await captureFromUrl(abs, win.webContents.getURL());
+        image = await captureFromUrl(abs, win.webContents.getURL(), ref);
         if (image) notes.push("التقاط من رابط صورة الروشتة");
       }
     }
@@ -1232,11 +1623,17 @@ async function processForm(win, job) {
     timings.captureMs = Date.now() - t0 - (timings.searchMs || 0) - (timings.clickMs || 0);
 
     if (!image || !image.dataUrl) {
+      const reason = image?.reason || image?.diag?.reason || "no-image";
+      capLog(ref, `فشل نهائي (${reason}) — ${tried.length} رابط شبكة اتجرب`);
       return {
         ok: false,
-        error: popup.urls.length
-          ? "نافذة الروشتة اتفتحت لكن مفيش صورة مقروءة فيها"
-          : "مفيش صورة روشتة ظهرت بعد الضغط على الرقم المرجعي",
+        error:
+          reason === "protected"
+            ? "صورة الروشتة محمية من العرض — جرّب «الموقع في المتصفح» وافتح الروشتة يدويًا"
+            : popup.urls.length
+              ? "نافذة الروشتة اتفتحت لكن مفيش صورة مقروءة فيها"
+              : "مفيش صورة روشتة ظهرت بعد الضغط على الرقم المرجعي",
+        reason,
         timings,
         popupUrls: popup.urls,
       };
@@ -1469,19 +1866,55 @@ ipcMain.handle("nd:login", async (_e, payload) => {
       password: String(payload.password || "").slice(0, 400),
     };
   }
+  const started = Date.now();
   try {
     return await workers.with(async (win) => {
+      // أسرع طريق: الجلسة شغالة أصلًا
       const state = await pageState(win);
-      if (state && state.hasCode) return { ok: true, already: true };
-      await safeLoad(win, SEARCH_URL);
+      if (state && state.hasCode) return { ok: true, already: true, ms: Date.now() - started };
+
+      // نجرب صفحة البحث الأول: لو دخلت يبقى الجلسة سارية (مفيش داعي لتسجيل جديد)
+      await safeLoad(win, SEARCH_URL, TIMEOUTS.login);
       const ready = await pageState(win);
-      if (ready && ready.hasCode) return { ok: true, already: true };
-      await loginOnce(win, credentials);
+      if (ready && ready.hasCode) {
+        win.__rpReady = true;
+        setBusy(true);
+        return { ok: true, already: true, ms: Date.now() - started };
+      }
+
+      // نايس دير رجّعنا لصفحة الدخول → تسجيل دخول حقيقي مع تقرير السبب
+      const res = await loginOnce(win, credentials);
+
+      // تأكيد نهائي: صفحة البحث بتفتح؟
+      const verified = await verifySessionBySearchPage(win);
+      if (!verified) {
+        const last = await probeLogin(win);
+        return {
+          ok: false,
+          verified: false,
+          state: last ? last.state : "unknown",
+          error:
+            "البيانات اتقبلت بس صفحة البحث مش بتفتح — " +
+            (last ? last.message : "الصفحة مش بتستجيب") +
+            " — جرّب «الموقع في المتصفح» وتأكد إن الحساب مفعّل عليه صرف نايس دير",
+          ms: Date.now() - started,
+        };
+      }
       setBusy(true);
-      return { ok: true, already: false };
+      return {
+        ok: true,
+        already: Boolean(res && res.already),
+        verified: true,
+        ms: Date.now() - started,
+      };
     });
   } catch (err) {
-    return { ok: false, error: String(err?.message || err) };
+    return {
+      ok: false,
+      error: String(err?.message || err),
+      state: "error",
+      ms: Date.now() - started,
+    };
   }
 });
 
