@@ -4,7 +4,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { persistSlice, type AppState } from "./store";
+import { getSaveState, markSaveState, persistSlice, subscribeSave, type AppState } from "./store";
 
 const base = {
   settings: {
@@ -77,4 +77,50 @@ test("الحفظ: الحالة الأصلية مش بتتعدّل (دالة نق
   persistSlice(base);
   assert.equal(JSON.stringify(base.cases.a.rx.dataUrl), before);
   assert.equal(base.settings.niceDeerPass, "SuperSecret#1");
+});
+
+// ---------------------------------------------------------------------------
+// مؤشر الحفظ — الثابت اللي كان بيعمل React error #185 (Maximum update depth)
+// ---------------------------------------------------------------------------
+
+test("مؤشر الحفظ: نفس المرجع بين النداءات (مفيش إعادة رسم لا نهائية)", () => {
+  // useSyncExternalStore بيقارن بـ Object.is — أي كائن جديد كل نداء = حلقة لا نهائية
+  const a = getSaveState();
+  const b = getSaveState();
+  const c = getSaveState();
+  assert.equal(a, b);
+  assert.equal(b, c);
+});
+
+test("مؤشر الحفظ: المرجع بيتغيّر بس لما القيمة تتغيّر فعلًا", () => {
+  const before = getSaveState();
+  markSaveState(before.dirty, before.savedAt); // نفس القيم → مفيش تغيير
+  assert.equal(getSaveState(), before);
+
+  markSaveState(true);
+  const dirty = getSaveState();
+  assert.notEqual(dirty, before);
+  assert.equal(dirty.dirty, true);
+
+  markSaveState(false, 1_700_000_000_000);
+  const saved = getSaveState();
+  assert.equal(saved.dirty, false);
+  assert.equal(saved.savedAt, 1_700_000_000_000);
+});
+
+test("مؤشر الحفظ: المشتركين بيتنادى عليهم عند التغيير بس", () => {
+  let calls = 0;
+  const off = subscribeSave(() => (calls += 1));
+  try {
+    const now = getSaveState();
+    markSaveState(now.dirty, now.savedAt); // مفيش تغيير
+    assert.equal(calls, 0);
+    markSaveState(!now.dirty, now.savedAt + 5);
+    assert.equal(calls, 1);
+  } finally {
+    off();
+  }
+  const after = getSaveState();
+  markSaveState(!after.dirty, after.savedAt + 5);
+  assert.equal(calls, 1, "بعد إلغاء الاشتراك مايتناداش");
 });
