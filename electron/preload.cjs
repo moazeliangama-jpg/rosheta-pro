@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.10",
+  version: "1.0.11",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),

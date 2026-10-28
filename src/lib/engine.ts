@@ -644,35 +644,39 @@ export class SessionEngine {
       while (this.paused && !this.cancelled) await sleep(150);
       if (this.cancelled) return;
 
-      const cases = await this.scanOne(patient);
-      if (!cases.length || this.cancelled) return;
-
-      const queue = cases
-        .map((c) => useAppStore.getState().cases[c.id] ?? c)
-        .filter((c) => this.needsImage(c))
-        .sort(byDate);
-
-      const st = useAppStore.getState();
-      st.patchSession({
-        phase: queue.length ? "images" : "scan",
-        // العدد الإجمالي المعروف لحد دلوقتي — شريط التقدم بيفضل واقعي
-        formsTotal: Object.values(st.cases).filter((c) => this.needsImage(c)).length + this.doneForms,
-      });
-
-      for (const c of queue) {
-        while (this.paused && !this.cancelled) await sleep(150);
-        if (this.cancelled) return;
-        await this.fetchImage(c);
-        this.doneForms += 1;
-        this.onTick();
-      }
-
-      // الساب خلص استماراته بالكامل على نفس المتصفح → المتصفح يرجع للحوض
-      // نضيف، والساب اللي بعده يبدأ من صفحة بحث جديدة (عزل حقيقي مش شكلي)
       try {
-        await bridge()?.releaseSab({ sab: patient.sab });
-      } catch {
-        /* تحرير النافذة مش حرج */
+        const cases = await this.scanOne(patient);
+        if (!cases.length || this.cancelled) return;
+
+        const queue = cases
+          .map((c) => useAppStore.getState().cases[c.id] ?? c)
+          .filter((c) => this.needsImage(c))
+          .sort(byDate);
+
+        const st = useAppStore.getState();
+        st.patchSession({
+          phase: queue.length ? "images" : "scan",
+          // العدد الإجمالي المعروف لحد دلوقتي — شريط التقدم بيفضل واقعي
+          formsTotal: Object.values(st.cases).filter((c) => this.needsImage(c)).length + this.doneForms,
+        });
+
+        for (const c of queue) {
+          while (this.paused && !this.cancelled) await sleep(150);
+          if (this.cancelled) return;
+          await this.fetchImage(c);
+          this.doneForms += 1;
+          this.onTick();
+        }
+      } finally {
+        // الساب خلص استماراته (أو فشل/اتلغى) → المتصفح يرجع للحوض نضيف،
+        // والساب اللي بعده يبدأ من صفحة بحث جديدة (عزل حقيقي مش شكلي).
+        // التحرير في finally مقصود: أي خروج مبكر (مفيش استمارات، إلغاء، خطأ)
+        // كان بيسيب المتصفح محجوز للساب للأبد → نوافذ بتقف عن الشغل.
+        try {
+          await bridge()?.releaseSab({ sab: patient.sab });
+        } catch {
+          /* تحرير النافذة مش حرج */
+        }
       }
     });
 
