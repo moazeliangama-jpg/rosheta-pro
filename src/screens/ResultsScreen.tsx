@@ -223,6 +223,11 @@ export function ResultsScreen() {
             <EmptyState
               title="لسه مفيش رسائل"
               body="اضغط «تجهيز الرسائل» بعد ما تحدد الاستمارات اللي بها دواء وتأكد الشهري لكل ساب. الرسالة بتتبعت مرة واحدة لكل ساب لكل نوع."
+              action={
+                <Button size="sm" onClick={prepare} className="mt-2">
+                  <MessageCircle className="h-3.5 w-3.5" /> تجهيز الرسائل
+                </Button>
+              }
             />
           </div>
         ) : (

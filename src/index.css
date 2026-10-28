@@ -36,3 +36,28 @@ body {
 input[type="time"]::-webkit-calendar-picker-indicator {
   filter: invert(0.8);
 }
+
+/*
+ * تقليل الحركة: للمستخدم اللي بيختارها أو الجهاز اللي بيطلبها.
+ * بنوقف الانتقالات والحركات عشان الأداء والراحة — الدوران بيبقى شغّال
+ * لأنه مؤشر «شغّال مش معلّق».
+ */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  transition-duration: 0.001ms !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+}
+.reduce-motion .animate-spin {
+  animation-duration: 1s !important;
+  animation-iteration-count: infinite !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.001ms !important;
+  }
+}

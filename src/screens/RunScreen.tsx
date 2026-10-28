@@ -26,12 +26,15 @@ export function RunScreen({
   onStop,
   onDecision,
   onRetryFailed,
+  onSetup,
 }: {
   onPause: () => void;
   onResume: () => void;
   onStop: () => void;
   onDecision: () => void;
   onRetryFailed: () => void;
+  /** الرجوع للإعداد من الحالة الفاضية */
+  onSetup?: () => void;
 }) {
   const session = useAppStore((s) => s.session);
   const cases = useAppStore((s) => s.cases);
@@ -276,6 +279,13 @@ export function RunScreen({
         <EmptyState
           title="مفيش جرد لسه"
           body="ارجع للإعداد، اختار الباير وارفع ملف السابات، واضغط «جرد الاستمارات» — الجرد بيقرأ الجدولين من نايس دير فعليًا."
+          action={
+            onSetup ? (
+              <Button size="sm" onClick={onSetup} className="mt-2">
+                روح للإعداد
+              </Button>
+            ) : undefined
+          }
         />
       ) : null}
     </div>
