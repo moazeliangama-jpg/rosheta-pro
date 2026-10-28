@@ -1,12 +1,16 @@
 {
-  "name": "react-vite-tailwind",
+  "name": "rosheta-pro",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/build-tests.mjs && node --test \"scripts/.tests/*.mjs\" \"scripts/*.test.mjs\"",
+    "check:snippets": "node scripts/check-snippets.mjs"
   },
   "dependencies": {
     "clsx": "2.1.1",
@@ -26,9 +30,11 @@
     "@vitejs/plugin-react": "5.1.1",
     "electron": "^41.7.1",
     "electron-builder": "^26.18.0",
+    "jsdom": "^30.1.3",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",
     "vite-plugin-singlefile": "2.3.0"
-  }
+  },
+  "main": "electron/main.cjs"
 }

@@ -1,0 +1,8 @@
+node_modules/
+dist/
+release/
+build/
+scripts/.smoke/
+*.log
+.DS_Store
+scripts/.tests/

@@ -1,0 +1,207 @@
+// أنواع البيانات — روشتة برو (أتمتة نايس دير الحقيقية)
+
+export type FormSource = "pre-approval" | "claim";
+
+/** استمارة كما تُقرأ من جدولي صفحة البحث في نايس دير */
+export interface NdForm {
+  /** مفتاح ثابت: الساب + المصدر + الرقم المرجعي */
+  refId: string;
+  source: FormSource;
+  /** الرقم المرجعي (ID في جدول Pre-Approvals أو ND Claim ID في جدول Claims) */
+  reference: string;
+  /** تاريخ الصف كما ظهر (Pre-Approval Date أو Claim Date) */
+  date: string;
+  /** التاريخ بعد التحويل ISO (yyyy-mm-dd) */
+  dateISO: string;
+  /** قيمة عمود Type / Claim Type */
+  type: string;
+  claimType: string;
+  /** Claim Code لو موجود */
+  code: string;
+  /** رابط صفحة الاستمارة (Claims) — بيستخدم في الإرجاع والالتقاط */
+  href: string;
+  status: string;
+  /** هل الصف مسجّل شهري (من عمود النوع) */
+  monthly: boolean;
+  rowText: string;
+}
+
+export interface NdSearchResult {
+  sab: string;
+  phone: string;
+  name: string;
+  forms: NdForm[];
+  empty: boolean;
+  note?: string;
+  url?: string;
+}
+
+export type RxStatus = "pending" | "loading" | "ready" | "failed";
+
+export interface RxImage {
+  status: RxStatus;
+  dataUrl?: string;
+  reason?: string;
+  attempts: number;
+  updatedAt: number;
+  /** طريقة الالتقاط الحقيقية: canvas / fetch / screenshot / background */
+  method?: string;
+}
+
+export type Verdict = "available" | "unavailable" | null;
+
+export interface CaseRecord {
+  id: string;
+  sab: string;
+  patientName: string;
+  phone: string;
+  workplace: string;
+  payerId: string;
+  payerName: string;
+
+  source: FormSource;
+  reference: string;
+  type: string;
+  claimType: string;
+  code: string;
+  href: string;
+  formDate: string;
+  formDateISO: string;
+  monthly: boolean;
+
+  /** داخل مدة الصلاحية (6 أيام، أو الشهر الحالي للـ Pre-Approval) */
+  valid: boolean;
+  validityReason: string;
+
+  deleted: boolean;
+  deleteState: string;
+  rx: RxImage;
+
+  /** القرار البشري: الاستمارة بها دواء؟ */
+  hasDrugs: Verdict;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** حالة الشهري لكل ساب — تحتاج تأكيد بشري زي ما الطلب نص */
+export interface MonthlyCheck {
+  sab: string;
+  patientName: string;
+  phone: string;
+  workplace: string;
+  /** آخر استمارة شهرية وتاريخها */
+  lastMonthlyDate: string;
+  lastMonthlyRef: string;
+  daysSince: number | null;
+  /** متاح حسب قاعدة 6 أيام */
+  computed: "available" | "unavailable" | "unknown";
+  reason: string;
+  /** تأكيد المستخدم */
+  confirmed: "available" | "unavailable" | null;
+  updatedAt: number;
+}
+
+export interface PatientRow {
+  sab: string;
+  name: string;
+  phone: string;
+  workplace: string;
+}
+
+export interface FailedRecord {
+  id: string;
+  sab: string;
+  patientName: string;
+  workplace: string;
+  step: "بحث" | "صورة" | "إرجاع" | "رسالة";
+  reference: string;
+  reason: string;
+  at: number;
+}
+
+export interface LogEntry {
+  id: string;
+  at: number;
+  level: "info" | "ok" | "warn" | "error";
+  msg: string;
+}
+
+export interface SpeedSample {
+  at: number;
+  done: number;
+  failed: number;
+  forms: number;
+  workers: number;
+}
+
+export type SessionState = "idle" | "scanning" | "running" | "paused" | "done";
+
+export interface SessionMeta {
+  state: SessionState;
+  phase: "idle" | "scan" | "images";
+  startedAt: number | null;
+  endedAt: number | null;
+  subsTotal: number;
+  subsDone: number;
+  formsTotal: number;
+  formsDone: number;
+  images: number;
+  failures: number;
+  workers: number;
+  autoWorkers: boolean;
+  decisions: string[];
+  lastTuneAt: number;
+}
+
+export interface OutreachMessage {
+  id: string;
+  sab: string;
+  name: string;
+  phone: string;
+  kind: "drugs" | "monthly";
+  text: string;
+  status: "queued" | "sending" | "sent" | "failed";
+  error?: string;
+  at: number;
+  reply: "approved" | "rejected" | "postpone" | "pending";
+  replyText?: string;
+  replyAt?: number;
+}
+
+export interface Payer {
+  id: string;
+  name: string;
+}
+
+export interface Settings {
+  workplace: string;
+  payerId: string;
+  payerName: string;
+  niceDeerUser: string;
+  niceDeerPass: string;
+  receptionNumbers: string;
+  sessionTime: string;
+  reportTime: string;
+  workerChoice: "auto" | "3" | "5" | "8" | "10";
+  /** 6 أيام افتراضيًا */
+  validityDays: number;
+  /** منع الضغط على Delete (الإرجاع) — افتراضيًا الضغط بيتم زي طريقة الصرف */
+  preventDelete: boolean;
+  /** تشغيل الصور للاستمارات خارج المدة (افتراضيًا لا) */
+  includeInvalid: boolean;
+  messageDrugs: string;
+  messageMonthly: string;
+  replyPositive: string;
+  replyNegative: string;
+  replyPostpone: string;
+  sendDelaySec: number;
+  lastReportDate: string;
+  lastAutoSessionDate: string;
+  lastScanAt: number;
+}
+
+export interface BridgeResult<T = unknown> {
+  ok: boolean;
+  error?: string;
+  data?: T;
+}

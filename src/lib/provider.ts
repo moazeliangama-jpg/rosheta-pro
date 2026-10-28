@@ -1,0 +1,62 @@
+import type { BridgeResult, NdSearchResult } from "./types";
+
+/**
+ * الجسر إلى محرك سطح المكتب — مفيش أي محاكاة هنا.
+ * كل دالة بتنادي أتمتة حقيقية على نايس دير، ولو الجسر مش موجود
+ * بيرمي خطأ صريح بدل ما يرجع بيانات وهمية.
+ */
+
+export interface RoshettaBridge {
+  platform: string;
+  version: string;
+  setCredentials: (p: { username?: string; password?: string; maxWorkers?: number }) => Promise<BridgeResult>;
+  setWorkers: (n: number) => Promise<BridgeResult>;
+  login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
+  status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number }>;
+  searchSub: (p: { sab: string; payerId: string; payerName: string }) => Promise<BridgeResult<NdSearchResult>>;
+  fetchFormImage: (p: {
+    sab: string;
+    reference: string;
+    source: "pre-approval" | "claim";
+    href?: string;
+    payerId: string;
+    payerName: string;
+    preventDelete: boolean;
+  }) => Promise<BridgeResult<{ dataUrl: string; method: string; deleted: boolean; deleteState: string; attemptsLog: string[] }>>;
+  deleteForm: (p: { sab: string; reference: string; source: string; payerId: string; payerName: string }) => Promise<BridgeResult>;
+  logoutNiceDeer: () => Promise<BridgeResult>;
+  openSearchSite: () => Promise<BridgeResult>;
+  wa: {
+    status: () => Promise<BridgeResult & { state?: string }>;
+    pair: () => Promise<BridgeResult & { state?: string }>;
+    logout: () => Promise<BridgeResult>;
+    send: (p: { phone: string; text: string }) => Promise<BridgeResult>;
+    replies: (p: { phone: string }) => Promise<BridgeResult<{ last: string; all: Array<{ text: string; incoming: boolean }> }>>;
+    openChat: (p: { phone: string; text?: string }) => Promise<BridgeResult>;
+  };
+  closeAll: () => Promise<boolean>;
+  openExternal: (url: string) => Promise<boolean>;
+}
+
+declare global {
+  interface Window {
+    roshetta?: RoshettaBridge;
+  }
+}
+
+export const bridge = (): RoshettaBridge | null => window.roshetta ?? null;
+export const hasDesktopBridge = () => Boolean(bridge());
+
+export function requireBridge(): RoshettaBridge {
+  const b = bridge();
+  if (!b) throw new Error("أتمتة نايس دير تحتاج نسخة سطح المكتب (الـ EXE) — المتصفح مش قادر يشغّل النوافذ المخفية");
+  return b;
+}
+
+/** تحويل أخطاء الجسر إلى رسالة عربية واضحة */
+export function bridgeError(res: BridgeResult | undefined, fallback: string) {
+  if (!res) return fallback;
+  return res.error || fallback;
+}
+
+export const WORKER_MAX = 10;
