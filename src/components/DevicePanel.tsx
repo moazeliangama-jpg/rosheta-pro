@@ -95,7 +95,9 @@ export function DevicePanel() {
   };
 
   /** ١٢٧) إحصاء/تنضيف ملفات اللوج واللقطات — مفيش ملفات بتكبر لانهائي */
-  const maintain = async (action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics") => {
+  const maintain = async (
+    action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" | "open-backups",
+  ) => {
     const b = bridge();
     if (!b) return;
     if (action === "stats" || action === "prune" || action === "clear") setCleanBusy(action);
@@ -266,6 +268,7 @@ export function DevicePanel() {
             <span className="text-white/40">
               {files.logs.count} لوج ({Math.round(files.logs.bytes / 1024)} ك.ب) · {files.diagnostics.count} لقطة
               تشخيص ({Math.round(files.diagnostics.bytes / 1024)} ك.ب)
+              {files.backups ? ` · ${files.backups.count} نسخة احتياطية (${Math.round(files.backups.bytes / 1024)} ك.ب)` : ""}
             </span>
           ) : (
             <span className="text-white/30">
@@ -278,6 +281,9 @@ export function DevicePanel() {
             </Button>
             <Button size="sm" variant="muted" onClick={() => void maintain("open-logs")}>
               <FolderOpen className="h-3.5 w-3.5" /> مجلد اللوج
+            </Button>
+            <Button size="sm" variant="muted" onClick={() => void maintain("open-backups")}>
+              <FolderOpen className="h-3.5 w-3.5" /> النسخ الاحتياطية
             </Button>
             <Button size="sm" variant="ghost" onClick={() => void maintain("prune")} disabled={cleanBusy !== null}>
               <Trash2 className="h-3.5 w-3.5" /> تنضيف القديم

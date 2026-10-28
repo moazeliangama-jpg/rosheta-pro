@@ -22,6 +22,7 @@ export interface MaintenanceInfo {
   removed?: number;
   logs: { count: number; bytes: number };
   diagnostics: { count: number; bytes: number };
+  backups?: { count: number; bytes: number };
   retention: { logs: number; diagnostics: number };
 }
 
@@ -54,9 +55,11 @@ export interface RoshettaBridge {
   /** فحص جاهزية الجهاز — البرنامج بيجهّز نفسه بنفسه */
   preflight: () => Promise<BridgeResult<{ checks: Array<{ key: string; label: string; ok: boolean; detail: string }>; ok: boolean; dirs?: Record<string, string> }>>;
   /** ١٢٧) صيانة ملفات اللوج والتشخيص: إحصاء / تنضيف القديم / مسح الكل */
-  maintenance: (p: { action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" }) => Promise<
-    BridgeResult<MaintenanceInfo & { dir?: string }>
-  >;
+  maintenance: (p: {
+    action: "stats" | "prune" | "clear" | "open-logs" | "open-diagnostics" | "open-backups";
+  }) => Promise<BridgeResult<MaintenanceInfo & { dir?: string }>>;
+  /** ٦٠) نسخة احتياطية يومية: الملف بيتحفظ في بيانات البرنامج */
+  backup: (p: { name: string; json: string }) => Promise<BridgeResult<{ file: string; bytes: number }>>;
   login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
   searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<

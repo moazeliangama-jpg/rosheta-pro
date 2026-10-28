@@ -77,10 +77,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const dataDir = () => app.getPath("userData");
 const logsDir = () => path.join(dataDir(), "logs");
 const diagDir = () => path.join(dataDir(), "diagnostics");
+const backupDir = () => path.join(dataDir(), "backups");
 
 /** إنشاء المجلدات اللي البرنامج محتاجها (لو مش موجودة) — بيشتغل أول تشغيل */
 function ensureRuntimeDirs() {
-  const dirs = { data: dataDir(), logs: logsDir(), diagnostics: diagDir() };
+  const dirs = { data: dataDir(), logs: logsDir(), diagnostics: diagDir(), backups: backupDir() };
   for (const dir of Object.values(dirs)) {
     try {
       fs.mkdirSync(dir, { recursive: true });
@@ -168,6 +169,20 @@ function pruneRuntime({ all = false } = {}) {
       }
     }
   }
+  // النسخ الاحتياطية: بنحتفظ بآخر ٧ بس (مش بالعمر — كل نسخة يوم)
+  try {
+    const backups = dirFiles(backupDir()).sort((a, b) => b.mtime - a.mtime);
+    for (const f of backups.slice(7)) {
+      try {
+        fs.rmSync(f.full, { force: true });
+        removed.push(f.name);
+      } catch {
+        /* تجاهل */
+      }
+    }
+  } catch {
+    /* تجاهل */
+  }
   if (all) {
     appLogPath = null;
     appLogSize = 0;
@@ -176,6 +191,7 @@ function pruneRuntime({ all = false } = {}) {
     removed: removed.length,
     logs: filesStats(logsDir()),
     diagnostics: filesStats(diagDir()),
+    backups: filesStats(backupDir()),
     retention: RETENTION_DAYS,
   };
 }
@@ -1365,6 +1381,38 @@ ipcMain.handle("app:preflight", async () => {
   }
 });
 
+/**
+ * ٦٠) نسخة احتياطية يومية: الريندرر بيبعت الحالة كـ JSON، والملف بيتحفظ في
+ * مجلد بيانات البرنامج (مش مجلد التثبيت — عشان مثبّت لكل المستخدمين ما يمنعش الكتابة).
+ */
+ipcMain.handle("app:backup", async (_e, payload) => {
+  try {
+    const json = String(payload?.json || "");
+    if (!json) return { ok: false, error: "مفيش بيانات للنسخة الاحتياطية" };
+    const name = String(payload?.name || `rosheta-backup-${new Date().toISOString().slice(0, 10)}.json`).replace(
+      /[^\w.\-]/g,
+      "_",
+    );
+    const dir = backupDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    // كتابة آمنة: ملف مؤقت وبعدين إعادة تسمية (مايبوظش نسخة قديمة لو الجهاز قفل فجأة)
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, json, "utf8");
+    fs.renameSync(tmp, file);
+    appendLog("info", `backup: ${name} (${Math.round(json.length / 1024)} ك.ب)`);
+    try {
+      const backups = dirFiles(dir).sort((a, b) => b.mtime - a.mtime);
+      for (const f of backups.slice(7)) fs.rmSync(f.full, { force: true });
+    } catch {
+      /* تجاهل */
+    }
+    return { ok: true, data: { file, bytes: json.length } };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
 ipcMain.handle("app:maintenance", async (_e, payload) => {
   try {
     const action = payload?.action || "stats";
@@ -1374,6 +1422,11 @@ ipcMain.handle("app:maintenance", async (_e, payload) => {
       ensureRuntimeDirs();
       const err = await shell.openPath(logsDir());
       return err ? { ok: false, error: err } : { ok: true, data: { dir: logsDir() } };
+    }
+    if (action === "open-backups") {
+      ensureRuntimeDirs();
+      const err = await shell.openPath(backupDir());
+      return err ? { ok: false, error: err } : { ok: true, data: { dir: backupDir() } };
     }
     if (action === "open-diagnostics") {
       ensureRuntimeDirs();
@@ -1385,6 +1438,7 @@ ipcMain.handle("app:maintenance", async (_e, payload) => {
       data: {
         logs: filesStats(logsDir()),
         diagnostics: filesStats(diagDir()),
+        backups: filesStats(backupDir()),
         retention: RETENTION_DAYS,
       },
     };

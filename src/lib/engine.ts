@@ -10,6 +10,7 @@ import { initialWorkers, tuneWorkers } from "./tune";
 import { prepareNote, preparePatients } from "./prepare";
 import { hourAdjustment } from "./hourly";
 import { setSaveDelay } from "./store";
+import { OFFLINE_MESSAGE, isOnline, waitForOnline } from "./net";
 
 export { buildTasks };
 export type { Task };
@@ -462,6 +463,26 @@ export class SessionEngine {
     this.log("ok", `انتهى الجرد — ${count} استمارة من ${patients.length} ساب.`);
   }
 
+  /**
+   * ٦٧) قبل أي شغل على الشبكة: لو النت واقف بنستنى رجوعه بدل ما نحرق المحاولات
+   * ونعلّم استمارات كأنها فشلت.
+   */
+  private async ensureOnline(what: string): Promise<void> {
+    if (isOnline()) return;
+    this.log("warn", `النت واقف قبل ${what} — البرنامج مستني رجوع الاتصال…`);
+    const self = this;
+    const signal = { get cancelled() { return self.cancelled; } };
+    const ok = await waitForOnline({
+      timeoutMs: 10 * 60 * 1000,
+      signal,
+      onWait: (ms) => {
+        if (ms > 0 && ms % 60000 === 0) this.log("info", `لسه مستني النت (${Math.round(ms / 60000)} دقيقة).`);
+      },
+    });
+    if (!ok || this.cancelled) throw new Error(OFFLINE_MESSAGE);
+    this.log("ok", "النت رجع — بنكمّل من نفس المكان.");
+  }
+
   private async scanOne(patient: PatientRow): Promise<CaseRecord[]> {
     const b = requireBridge();
     const s = this.settings();
@@ -469,6 +490,7 @@ export class SessionEngine {
     let lastError = "";
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      await this.ensureOnline(`بحث الساب ${patient.sab}`);
       const t0 = Date.now();
       try {
         const res = await b.searchSub({
@@ -674,6 +696,7 @@ export class SessionEngine {
     store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      await this.ensureOnline(`صورة ${c.reference}`);
       const t0 = Date.now();
       try {
         const res = await b.fetchFormImage({

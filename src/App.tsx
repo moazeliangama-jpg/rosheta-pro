@@ -10,6 +10,9 @@ import { ResultsScreen } from "./screens/ResultsScreen";
 import { Badge, Button, Card } from "./components/ui";
 import { DiagnosticsPanel } from "./components/DiagnosticsPanel";
 import { exportApproved } from "./lib/excel";
+import { isOnline } from "./lib/net";
+import { runDailyBackup } from "./lib/backup";
+import { WifiOff } from "lucide-react";
 import { dateKey, cn } from "./lib/utils";
 import type { CaseRecord } from "./lib/types";
 
@@ -33,6 +36,8 @@ export default function App() {
 
   const [, setTick] = useState(0);
   const [engine, setEngine] = useState<SessionEngine | null>(null);
+  // ٦٧) حالة الشبكة على الشاشة — التشغيل بيستنى رجوع النت بنفسه
+  const [online, setOnline] = useState(() => isOnline());
   const autoRef = useRef(false);
   const bridges = hasDesktopBridge();
 
@@ -50,6 +55,39 @@ export default function App() {
     if (b) void b.status().then((res) => setLoggedIn(Boolean(res?.loggedIn)));
     return () => clearTimeout(t);
   }, [hydrateImages, setLoggedIn]);
+
+  // ٦٧) متابعة حالة الشبكة
+  useEffect(() => {
+    const onUp = () => {
+      setOnline(true);
+      useAppStore.getState().logLine("ok", "النت رجع — التشغيل يقدر يكمّل.");
+    };
+    const onDown = () => {
+      setOnline(false);
+      useAppStore.getState().logLine("warn", "النت اتقطع — البرنامج بيستنى رجوع الاتصال، الشغل محفوظ.");
+    };
+    window.addEventListener("online", onUp);
+    window.addEventListener("offline", onDown);
+    return () => {
+      window.removeEventListener("online", onUp);
+      window.removeEventListener("offline", onDown);
+    };
+  }, []);
+
+  // ٦٠) نسخة احتياطية تلقائية مرة واحدة في اليوم
+  useEffect(() => {
+    if (!bridges) return;
+    const t = setTimeout(() => {
+      void runDailyBackup()
+        .then((res) => {
+          if (res) useAppStore.getState().logLine("ok", `اتعملت نسخة احتياطية لشغل النهاردة (${Math.round(res.bytes / 1024)} ك.ب).`);
+        })
+        .catch(() => {
+          /* النسخة الاحتياطية مش بتوقف البرنامج */
+        });
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [bridges]);
 
   // التشغيل التلقائي اليومي + تصدير إكسل الموافقين
   useEffect(() => {
@@ -233,6 +271,16 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
           </div>
         </div>
       </header>
+
+      {/* ٦٧) شريط ثابت لما النت يقطع — بيقول إن الشغل محفوظ والبرنامج مستني */}
+      {!online ? (
+        <div className="border-b border-amber-500/30 bg-amber-500/10">
+          <div className="mx-auto flex max-w-[1500px] items-center gap-2 px-4 py-2 text-xs text-amber-200">
+            <WifiOff className="h-4 w-4 shrink-0" />
+            النت واقف — التشغيل مستني رجوع الاتصال، وكل اللي اتعمل محفوظ. هيكمّل لوحده أول ما يرجع.
+          </div>
+        </div>
+      ) : null}
 
       <main className={settings.compactMode ? "relative mx-auto max-w-[1200px] px-2 py-2" : "relative mx-auto max-w-[1500px] px-4 py-4"}>
         {screen === "setup" ? (
