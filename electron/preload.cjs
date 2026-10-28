@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.2",
+  version: "1.0.3",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
@@ -15,7 +15,6 @@ contextBridge.exposeInMainWorld("roshetta", {
   status: () => ipcRenderer.invoke("nd:status"),
   searchSub: (payload) => ipcRenderer.invoke("nd:search", payload),
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),
-  deleteForm: (payload) => ipcRenderer.invoke("nd:delete", payload),
   deletes: () => ipcRenderer.invoke("nd:deletes"),
   retryDeletes: () => ipcRenderer.invoke("nd:retry-deletes"),
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
@@ -61,6 +60,8 @@ contextBridge.exposeInMainWorld("roshetta", {
   },
 
   closeAll: () => ipcRenderer.invoke("nd:close-all"),
+  /** كتابة ملف تصدير حقيقي على القرص وبرجوع المسار */
+  saveFile: (payload) => ipcRenderer.invoke("app:save-file", payload),
   openExportFolder: () => ipcRenderer.invoke("app:open-export-folder"),
   notify: (payload) => ipcRenderer.invoke("app:notify", payload),
   openExternal: (url) => ipcRenderer.invoke("app:open-external", url),

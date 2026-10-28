@@ -25,6 +25,7 @@ import {
 import { Badge, Button, Card, EmptyState, Progress, SectionTitle, Stat } from "../components/ui";
 import { bridge } from "../lib/provider";
 import { cn, dateKey, nowTime } from "../lib/utils";
+import { reportSave } from "../lib/saveFeedback";
 import type { OutreachMessage } from "../lib/types";
 
 const KIND_LABEL: Record<OutreachMessage["kind"], string> = {
@@ -125,6 +126,17 @@ export function ResultsScreen() {
     logLine(okCount === pending.length ? "ok" : "warn", `تم إرسال ${okCount} من ${pending.length} رسالة.`);
   };
 
+  /** تصدير حقيقي: الملف بيتكتب على القرص وبيرجع مساره، ومفيش «تم» من غير دليل */
+  const exportApprovedFile = async () => {
+    const x = await import("../lib/excel");
+    reportSave(await x.exportApproved(all, outreach), "تصدير إكسل الموافقين");
+  };
+
+  const exportDrugsFile = async () => {
+    const x = await import("../lib/excel");
+    reportSave(await x.exportWithDrugs(all), "تصدير إكسل بها دواء");
+  };
+
   const syncReplies = async () => {
     const b = bridge();
     if (!b) return;
@@ -176,24 +188,25 @@ export function ResultsScreen() {
           <Button variant="ghost" onClick={() => void syncReplies()} disabled={busy === "sync" || !stats.sent}>
             <RefreshCw className={cn("h-4 w-4", busy === "sync" && "animate-spin")} /> مزامنة الردود
           </Button>
-          <Button variant="ghost" onClick={() => void import("../lib/excel").then((x) => x.exportApproved(all, outreach))}>
+          <Button variant="ghost" onClick={() => void exportApprovedFile()}>
             <Download className="h-4 w-4" /> إكسل الموافقين
           </Button>
-          <Button variant="ghost" onClick={() => void import("../lib/excel").then((x) => x.exportWithDrugs(all))}>
+          <Button variant="ghost" onClick={() => void exportDrugsFile()}>
             <Download className="h-4 w-4" /> إكسل بها دواء
           </Button>
           <Button
             variant="ghost"
             onClick={() =>
-              void import("../lib/excel").then((x) =>
-                x.exportSessionReport({
+              void import("../lib/excel").then(async (x) => {
+                const res = await x.exportSessionReport({
                   cases: all,
                   failed,
                   samples,
                   steps: useAppStore.getState().steps,
                   sessionMs: session.startedAt ? (session.endedAt ?? Date.now()) - session.startedAt : 0,
-                }),
-              )
+                });
+                reportSave(res, "تصدير تقرير التشغيل");
+              })
             }
           >
             <Download className="h-4 w-4" /> تقرير التشغيل
@@ -322,7 +335,7 @@ export function ResultsScreen() {
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => void import("../lib/excel").then((x) => x.exportApproved(all, outreach))}
+            onClick={() => void exportApprovedFile()}
           >
             <Download className="h-3.5 w-3.5" /> تصدير
           </Button>

@@ -45,6 +45,7 @@ import { useUx } from "./lib/useUx";
 import type { NextAction } from "./lib/ux";
 import { toast } from "./lib/toast";
 import { exportApproved } from "./lib/excel";
+import { reportSave } from "./lib/saveFeedback";
 import { isOnline } from "./lib/net";
 import { runDailyBackup } from "./lib/backup";
 import { WifiOff } from "lucide-react";
@@ -149,9 +150,14 @@ export default function App() {
       const reportDue = now.getHours() === rh && now.getMinutes() === rm;
       if (reportDue && s.settings.lastReportDate !== today && s.outreach.length) {
         const all = Object.values(s.cases);
-        const count = exportApproved(all, s.outreach);
-        s.setSettings({ lastReportDate: today });
-        s.logLine("ok", `تم تصدير إكسل الموافقين اليومي (${count} صف).`);
+        void exportApproved(all, s.outreach).then((res) => {
+          if (!res.ok) {
+            s.logLine("error", `فشل تصدير إكسل الموافقين اليومي: ${res.error ?? "سبب غير معروف"}`);
+            return;
+          }
+          s.setSettings({ lastReportDate: today });
+          s.logLine("ok", `اتحفظ إكسل الموافقين اليومي (${res.count} صف) في: ${res.file ?? res.name}`);
+        });
       }
     }, 30000);
     return () => clearInterval(t);
@@ -365,8 +371,9 @@ export default function App() {
       group: "النتايج",
       run: () => {
         const st = useAppStore.getState();
-        const count = exportApproved(Object.values(st.cases), st.outreach);
-        toast.ok(`تم تصدير ${count} صف.`);
+        void exportApproved(Object.values(st.cases), st.outreach).then((res) => {
+          reportSave(res, "تصدير إكسل الموافقين");
+        });
       },
     },
     {

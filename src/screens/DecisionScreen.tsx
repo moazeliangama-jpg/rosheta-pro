@@ -26,6 +26,7 @@ import { Badge, Button, Card, EmptyState, SectionTitle, Stat } from "../componen
 import { RxImage, RxLightbox, SOURCE_LABEL } from "../components/RxViewer";
 import { SabDrugsView } from "../components/SabDrugsView";
 import { cn } from "../lib/utils";
+import { reportSave } from "../lib/saveFeedback";
 type ExcelModule = typeof import("../lib/excel");
 // مكتبة الإكسل بتتحمّل وقت التصدير بس — فتح البرنامج أسرع بكتير
 const excel = () => import("../lib/excel") as Promise<ExcelModule>;
@@ -54,6 +55,28 @@ export function DecisionScreen({
   const setSettings = useAppStore((s) => s.setSettings);
   const logLine = useAppStore((s) => s.logLine);
   const patients = useAppStore((s) => s.patients);
+
+  /** التصدير كله بيكتب ملف حقيقي على القرص ويرجّع مساره */
+  const exportAnalysisFile = async () => {
+    const x = await excel();
+    reportSave(await x.exportAnalysis(all), "تصدير جرد الاستمارات");
+  };
+
+  const exportDrugsFile = async () => {
+    const x = await excel();
+    reportSave(await x.exportWithDrugs(all), "تصدير إكسل بها دواء");
+  };
+
+  const exportPreApprovalFile = async () => {
+    const x = await excel();
+    reportSave(await x.exportPreApproval(all), "تصدير إكسل Pre-Approval");
+  };
+
+  /** إكسل الشهري: كتابة حقيقية على القرص + مسار الملف في الإشعار */
+  const exportMonthlyFile = async () => {
+    const x = await excel();
+    reportSave(await x.exportMonthly(monthlyRows), "تصدير إكسل الشهري");
+  };
 
   // ٧٨) الافتراضي «لم يُحسم» — الشاشة بتفتح على اللي محتاج شغل مش على الأرشيف
   const [tab, setTab] = useState<Tab>("undecided");
@@ -323,7 +346,7 @@ export function DecisionScreen({
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <SectionTitle hint={`${monthlyRows.length} ساب`}>الشهري متاح أم لا — أكّد لكل ساب</SectionTitle>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportMonthly(monthlyRows))}>
+            <Button size="sm" variant="ghost" onClick={() => void exportMonthlyFile()}>
               <Download className="h-3.5 w-3.5" /> إكسل الشهري
             </Button>
             <button
@@ -417,13 +440,13 @@ export function DecisionScreen({
               </button>
             ))}
           </div>
-          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportAnalysis(all))}>
+          <Button size="sm" variant="ghost" onClick={() => void exportAnalysisFile()}>
             <FileSpreadsheet className="h-3.5 w-3.5" /> جرد الاستمارات
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportWithDrugs(all))}>
+          <Button size="sm" variant="ghost" onClick={() => void exportDrugsFile()}>
             <Pill className="h-3.5 w-3.5" /> بها دواء
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportPreApproval(all))}>
+          <Button size="sm" variant="ghost" onClick={() => void exportPreApprovalFile()}>
             <ShieldCheck className="h-3.5 w-3.5" /> Pre-Approval
           </Button>
           {/* ٧٩) استكمال من مكان الوقوف */}

@@ -17,7 +17,7 @@ const scripts = {
   FIND_IMAGE_LINK_SCRIPT: S.FIND_IMAGE_LINK_SCRIPT,
   CLICK_DELETE_SCRIPT: S.CLICK_DELETE_SCRIPT,
   WA_STATE_SCRIPT: S.WA_STATE_SCRIPT,
-  WA_SEND_SCRIPT: S.WA_SEND_SCRIPT,
+  WA_SEND_SCRIPT: S.WA_SEND_SCRIPT("رسالة تجربة"),
   WA_LAST_REPLIES_SCRIPT: S.WA_LAST_REPLIES_SCRIPT,
 };
 
@@ -68,6 +68,7 @@ const wiring = {
   "لقطة شاشة مش فاضية": ["RX.isLikelyBlankShot", "capturePage"],
   "النافذة المفتوحة مسبقًا": ["adoptExisting", "did-create-window"],
   "سجل الالتقاط": ["capLog", "capture.log"],
+  "تأكيد إرسال واتساب": ["WA_SEND_SCRIPT(body)", "verified"],
 };
 for (const [label, tokens] of Object.entries(wiring)) {
   const missing = tokens.filter((t) => !all.includes(t));

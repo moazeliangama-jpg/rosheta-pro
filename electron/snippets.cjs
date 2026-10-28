@@ -660,8 +660,19 @@ const WA_STATE_SCRIPT = `(() => {
   return 'loading';
 })()`;
 
-const WA_SEND_SCRIPT = `(async () => {
+/**
+ * إرسال رسالة واتساب + **تأكيد** إنها ظهرت فعلًا في المحادثة.
+ *
+ * قبل كده كان بيضغط «Send» ويرجّع نجاح على طول — لو واتساب رفض أو الصفحة
+ * ما استجابتش، الرسالة كانت بتتحسب «اتبعتت» وهي ما اتبعتتش. دلوقتي النجاح
+ * مش بيتقال إلا لما فقاعة الرسالة تظهر في المحادثة.
+ */
+const WA_SEND_SCRIPT = (text = '') => `(async () => {
   ${HELPERS}
+  const expected = String(${JSON.stringify(String(text))} || '').replace(/\\s+/g, ' ').trim();
+  const probe = expected.slice(0, 40);
+  const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim();
+
   const findSend = () => {
     const sels = [
       '[data-testid="send"]',
@@ -679,14 +690,37 @@ const WA_SEND_SCRIPT = `(async () => {
   };
   const bodyText = () => document.body.innerText || '';
   const started = performance.now();
+
   const btn = await rpWait(() => {
     if (/invalid|غير صالح|phone number shared via url is invalid/i.test(bodyText())) return 'invalid';
     return findSend();
   }, 12000);
   if (btn === 'invalid') return { ok: false, error: 'رقم الواتساب غير صالح أو غير مسجل' };
   if (!btn) return { ok: false, error: 'زرار الإرسال لم يظهر — تأكد إن واتساب متصل' };
+
   btn.click();
-  return { ok: true, ms: Math.round(performance.now() - started) };
+
+  // التأكيد: الرسالة لازم تبان في فقاعات الصادرة بنفس النص
+  const seen = await rpWait(() => {
+    const bubbles = [...document.querySelectorAll('div.message-out, [data-testid="msg-container"]')];
+    for (const b of bubbles.slice(-15)) {
+      const t = norm(b.innerText || '');
+      if (t && probe && t.includes(probe.slice(0, Math.min(probe.length, 24)))) return true;
+    }
+    return false;
+  }, 15000);
+
+  if (!seen) {
+    const err = /couldn't send|تعذر الإرسال|failed to send|خطأ/i.test(bodyText());
+    return {
+      ok: false,
+      verified: false,
+      reason: err ? 'send-failed' : 'unverified',
+      error: err ? 'واتساب رفض الإرسال' : 'الرسالة اتكتبت لكن مش ظاهرة كمرسلة — افتح واتساب وتأكد',
+      ms: Math.round(performance.now() - started),
+    };
+  }
+  return { ok: true, verified: true, ms: Math.round(performance.now() - started) };
 })()`;
 
 const WA_LAST_REPLIES_SCRIPT = `(() => {

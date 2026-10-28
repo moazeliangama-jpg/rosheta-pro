@@ -173,14 +173,16 @@ export function RunScreen({
             variant="ghost"
             onClick={() => {
               // تحميل مكتبة الإكسل وقت التصدير بس — البرنامج بيفتح أسرع
-              void import("../lib/excel").then((x) =>
-                x.exportFailed(failed, {
+              void import("../lib/excel").then(async (x) => {
+                const res = await x.exportFailed(failed, {
                   "مدة التشغيل": elapsedLabel(elapsed),
                   "عدد الاستمارات": stats.total,
                   "صور جاهزة": stats.ready,
                   "متعثرة": stats.failed,
-                }),
-              );
+                });
+                const { reportSave } = await import("../lib/saveFeedback");
+                reportSave(res, "تصدير إكسل المتعثرين");
+              });
             }}
           >
             <Download className="h-3.5 w-3.5" /> إكسل المتعثرين
