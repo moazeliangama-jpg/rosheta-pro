@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
-import { Gauge, Play, Sparkles, Timer, TriangleAlert } from "lucide-react";
+import { CheckCheck, Gauge, Play, Sparkles, Timer, TriangleAlert } from "lucide-react";
 import { useAppStore } from "../lib/store";
+import { bridge } from "../lib/provider";
 import { analyzeInventorySpeed, formatDuration } from "../lib/analyzer";
 import { Badge, Button, Card, SectionTitle } from "./ui";
 import { cn } from "../lib/utils";
@@ -18,7 +19,10 @@ export function SpeedAnalyzerPanel({ sabs, forms }: { sabs: number; forms: numbe
   const steps = useAppStore((s) => s.steps);
   const session = useAppStore((s) => s.session);
   const settings = useAppStore((s) => s.settings);
+  const setSettings = useAppStore((s) => s.setSettings);
+  const logLine = useAppStore((s) => s.logLine);
   const [ran, setRan] = useState(false);
+  const [applied, setApplied] = useState("");
 
   // سقف النوافذ من أنوية الجهاز الحقيقية (نفس قاعدة المحرك: أنوية × ٢ بحد أقصى ١٢).
   // الرام الحقيقية بتيجي من العملية الرئيسية، وهنا مش متاحة — فالقيمة دي حد أدنى آمن.
@@ -47,6 +51,37 @@ export function SpeedAnalyzerPanel({ sabs, forms }: { sabs: number; forms: numbe
       measured,
     });
   }, [ran, steps, sabs, forms, session.workers, settings, cap, measured]);
+
+  /**
+   * «طبّق الخطة»: بغيّر إعدادات التشغيل بجد — الوضع المرعب، الإرجاع في الخلفية،
+   * وعدد النوافذ (بيتحقق من سقف الجهاز ويرجّع العدد الفعلي).
+   * المحلّل مش تقرير للقراءة بس؛ نتيجته بتتنفذ.
+   */
+  const applyBest = async () => {
+    const plan = result?.best;
+    if (!plan) return;
+    setSettings({
+      turboMode: plan.turbo,
+      preventDelete: !plan.deleteInBackground,
+      workerChoice: plan.workers === 5 || plan.workers === 8 || plan.workers === 12 || plan.workers === 16 ? String(plan.workers) as "5" | "8" | "12" | "16" : "auto",
+    });
+    const b = bridge();
+    if (!b) {
+      setApplied(`اتظبط الوضع ${plan.turbo ? "المرعب" : "العادي"} والإرجاع ${plan.deleteInBackground ? "في الخلفية" : "في المقدمة"} — عدد النوافذ بيتطبق في نسخة سطح المكتب.`);
+      logLine("ok", "اتطبقت الخطة المقترحة (بدون تغيير عدد النوافذ — الجسر مش موجود في المتصفح).");
+      return;
+    }
+    const res = await b.setWorkers(plan.workers);
+    // العدد الفعلي اللي المحرك اشتغل بيه محدود بسقف الجهاز
+    const actual = Math.min(plan.workers, res?.data?.maxWorkers ?? plan.workers);
+    setApplied(`اتطبقت: ${actual} نوافذ · ${plan.turbo ? "جرد+صور لنفس الساب" : "جرد ثم صور"} · الإرجاع ${plan.deleteInBackground ? "في الخلفية" : "في المقدمة"}.`);
+    logLine(
+      res?.ok ? "ok" : "warn",
+      res?.ok
+        ? `اتطبقت الخطة: ${actual} نوافذ ${plan.turbo ? "· وضع مرعب" : ""} ${plan.deleteInBackground ? "· الإرجاع في الخلفية" : "· الإرجاع في المقدمة"}.`
+        : `الخطة اتسجلت بس عدد النوافذ اترفض: ${res?.error ?? "سبب غير معروف"}`,
+    );
+  };
 
   return (
     <Card className="p-0">
@@ -91,6 +126,12 @@ export function SpeedAnalyzerPanel({ sabs, forms }: { sabs: number; forms: numbe
                 ) : (
                   <span className="text-white/40">الإعداد الحالي هو الأسرع</span>
                 )}
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <Button size="sm" variant="ghost" onClick={() => void applyBest()}>
+                  <CheckCheck className="h-3.5 w-3.5" /> طبّق الخطة دي
+                </Button>
+                {applied ? <span className="text-[11px] text-emerald-300">{applied}</span> : null}
               </div>
             </div>
 
