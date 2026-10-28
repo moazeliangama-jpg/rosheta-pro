@@ -13,7 +13,8 @@
 //   • الإرجاع (Delete) بيتم في طابور منفصل في الخلفية — مش بيوقف جلب الصور.
 //   • بركة نوافذ قابلة لإعادة الاستخدام + تسخين مسبق (warm-up) لكل النوافذ.
 // ============================================================================
-const { app, BrowserWindow, ipcMain, session, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, session, shell, powerSaveBlocker, Notification } = require("electron");
+const os = require("node:os");
 const path = require("node:path");
 
 const S = require("./snippets.cjs");
@@ -27,8 +28,22 @@ const WA_PARTITION = "persist:whatsapp";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
 
-const MAX_WORKERS = 16;
-const MAX_DELETERS = 3;
+/** سقف النوافذ الحقيقي = الأقل بين حد ثابت وإمكانيات الجهاز (رام + أنوية) */
+function hardwareCap() {
+  const ramGb = os.totalmem() / 1024 ** 3;
+  const cores = os.cpus()?.length || 4;
+  const byRam = Math.floor((ramGb * 1024 - 2048) / 450);
+  const byCores = Math.max(2, cores * 2);
+  return Math.max(1, Math.min(16, byRam, byCores, 12));
+}
+
+const MAX_WORKERS = hardwareCap();
+/** الإرجاع بقى أسرع من الأول لأن النوافذ بتشتغل بدون صور */
+const MAX_DELETERS = Math.max(2, Math.min(6, Math.round(MAX_WORKERS / 2)));
+/** أقصى عمليات لكل نافذة قبل ما نستبدلها (تسرّب الذاكرة في Chromium حقيقي) */
+const MAX_OPS_PER_WINDOW = 200;
+/** فوق الرقم ده بنوقف جلب الصور مؤقتًا لحد ما الطابور ينزل */
+const DELETE_BACKLOG_LIMIT = 60;
 
 const TIMEOUTS = {
   pageLoad: 40000,
@@ -45,6 +60,12 @@ app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 app.commandLine.appendSwitch("disable-features", "CalculateNativeWinOcclusion");
 app.commandLine.appendSwitch("disable-ipc-flooding-protection");
+// كاش قرص أكبر = صور روشتات وصفحات أسرع في الجلسة اللي بعدها
+app.commandLine.appendSwitch("disk-cache-size", String(200 * 1024 * 1024));
+// مفيش WebGL ولا إضافات: استخدام موارد أقل من غير أي تأثير على الأتمتة
+// (الصور بتترسم على canvas ثنائي الأبعاد، فمش محتاجين 3D خالص)
+app.commandLine.appendSwitch("disable-3d-apis");
+app.commandLine.appendSwitch("disable-extensions");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -61,11 +82,54 @@ async function run(win, code) {
   }
 }
 
-/** نفس run لكن بيرمي الخطأ الحقيقي بدل ما يخفيه */
+/** وعد بمهلة: لو الصفحة اتعلّقت، بنفكّ التعليق بدل ما الجلسة تقف */
+function withTimeout(promise, ms, onTimeout) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        onTimeout?.();
+      } catch {
+        /* تجاهل */
+      }
+      reject(new Error("الصفحة مش بتستجيب — النافذة هتتستبدل"));
+    }, ms);
+    promise.then(
+      (value) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/**
+ * تنفيذ كود في الصفحة مع watchdog:
+ * نافذة متعلقة أكتر من ٤٥ ثانية (سيرفر بطيء، مودال معلّق) بتتدمّر
+ * والبركة بتفتح غيرها — أحسن من جلسة واقفة للأبد.
+ */
+const STUCK_WINDOW_MS = 45000;
+
 async function runStrict(win, code) {
   if (!win || win.isDestroyed()) throw new Error("النافذة اتقفلت");
   try {
-    return await win.webContents.executeJavaScript(code, true);
+    return await withTimeout(win.webContents.executeJavaScript(code, true), STUCK_WINDOW_MS, () => {
+      try {
+        if (!win.isDestroyed()) win.destroy();
+      } catch {
+        /* تجاهل */
+      }
+    });
   } catch (err) {
     const message = String(err && err.message ? err.message : err).replace(/^Error:\s*/, "");
     throw new Error(message);
@@ -178,8 +242,9 @@ function firstSuccess(promises, timeoutMs) {
 function hiddenWindowOptions(extra = {}) {
   return {
     show: false,
-    width: 1400,
-    height: 1000,
+    // نافذة أصغر = ذاكرة ورسم أقل، ومفيش أي تأثير على قراءة الصفحة
+    width: 1000,
+    height: 700,
     webPreferences: {
       partition: ND_PARTITION,
       backgroundThrottling: false,
@@ -193,18 +258,55 @@ function hiddenWindowOptions(extra = {}) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// تقليل الموارد: خطوط وميديا وتتبّع دايمًا، وصور صفحة البحث لما مفيش روشتة
+// ---------------------------------------------------------------------------
+
+/** نوافذ ممنوع فيها تحميل الصور (صفحة البحث والإرجاع) — بتتقفل قبل فتح الروشتة */
+const noImageWindows = new Set();
+let webRequestReady = false;
+
+function setResourceMode(win, mode) {
+  if (!win || win.isDestroyed()) return;
+  const id = win.webContents.id;
+  if (mode === "images") noImageWindows.delete(id);
+  else noImageWindows.add(id);
+}
+
+function setupResourceBlocking() {
+  if (webRequestReady) return;
+  webRequestReady = true;
+  try {
+    const nd = session.fromPartition(ND_PARTITION);
+    nd.webRequest.onBeforeRequest((details, callback) => {
+      const type = details.resourceType;
+      // الخطوط والوسائط مش محتاجينها لا في البحث ولا في الروشتة
+      if (type === "font" || type === "media") return callback({ cancel: true });
+      if (type === "image" && noImageWindows.has(details.webContentsId)) return callback({ cancel: true });
+      if (/google-analytics|googletagmanager|doubleclick|hotjar|clarity\.ms|sentry\.io|facebook\.net/i.test(details.url)) {
+        return callback({ cancel: true });
+      }
+      return callback({});
+    });
+  } catch {
+    /* لو الواجهة مش مدعومة، بنكمل عادي */
+  }
+}
+
 const DEFAULT_POPUP_HANDLER = ({ url }) => {
   if (!/^https?:\/\/([a-z0-9-]+\.)*nicedeer\.[a-z]+/i.test(url)) shell.openExternal(url);
   return { action: "deny" };
 };
 
 class WindowPool {
-  constructor({ name, max, keepState }) {
+  constructor({ name, max, keepState, blockImages = true }) {
     this.name = name;
     this.max = max;
     this.windows = [];
     this.busy = new Set();
     this.keepState = keepState;
+    this.blockImages = blockImages;
+    this.idleSince = new Map();
   }
 
   get size() {
@@ -212,16 +314,56 @@ class WindowPool {
   }
 
   create() {
+    setupResourceBlocking();
     const win = new BrowserWindow({ ...hiddenWindowOptions(), title: `rp-${this.name}` });
     win.webContents.setUserAgent(UA);
     win.webContents.setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
+    win.__rpOps = 0;
+    setResourceMode(win, this.blockImages ? "search" : "images");
+    // منع تحويل أي نافذة لصفحة غير متوقعة (بيحصل مع redirects لصفحة الدخول)
     win.on("closed", () => {
       const i = this.windows.indexOf(win);
       if (i >= 0) this.windows.splice(i, 1);
       this.busy.delete(win);
+      this.idleSince.delete(win);
+      if (!win.isDestroyed()) noImageWindows.delete(win.webContents.id);
     });
     this.windows.push(win);
     return win;
+  }
+
+  /** نافذة اتقفلت أو عملت عمليات كتير → نشيلها من البركة */
+  destroy(win) {
+    const i = this.windows.indexOf(win);
+    if (i >= 0) this.windows.splice(i, 1);
+    this.busy.delete(win);
+    this.idleSince.delete(win);
+    try {
+      if (!win.isDestroyed()) {
+        noImageWindows.delete(win.webContents.id);
+        win.destroy();
+      }
+    } catch {
+      /* تجاهل */
+    }
+  }
+
+  /** تقليل النوافذ الخاملة لما الذاكرة تقرب تخلص أو بعد فترة سكون */
+  prune({ force = false } = {}) {
+    const free = this.windows.filter((w) => !this.busy.has(w) && !w.isDestroyed());
+    const freeMemMb = os.freemem() / 1024 ** 2;
+    const keep = force ? 0 : Math.min(free.length, 1);
+    let removed = 0;
+    for (const win of free) {
+      if (removed >= free.length - keep) break;
+      const idleFor = Date.now() - (this.idleSince.get(win) || Date.now());
+      const lowMemory = freeMemMb < 900 && this.windows.length > 2;
+      if (lowMemory || force || idleFor > 120000) {
+        this.destroy(win);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   async acquire(timeoutMs = 180000) {
@@ -249,6 +391,18 @@ class WindowPool {
 
   release(win) {
     this.busy.delete(win);
+    if (!win || win.isDestroyed()) return;
+    // إعادة تدوير النافذة بعد عدد عمليات كبير: بتمنع تضخّم الذاكرة في الجلسات الطويلة
+    win.__rpOps = (win.__rpOps || 0) + 1;
+    this.idleSince.set(win, Date.now());
+    if (win.__rpOps >= MAX_OPS_PER_WINDOW) {
+      this.destroy(win);
+      return;
+    }
+    const freeMemMb = os.freemem() / 1024 ** 2;
+    if (freeMemMb < 900 && this.windows.length > 2 && this.windows.length > this.busy.size + 1) {
+      this.destroy(win);
+    }
   }
 
   /**
@@ -297,8 +451,19 @@ class WindowPool {
   }
 }
 
-const workers = new WindowPool({ name: "workers", max: 5, keepState: true });
-const captures = new WindowPool({ name: "captures", max: 4, keepState: false });
+const workers = new WindowPool({ name: "workers", max: Math.min(5, MAX_WORKERS), keepState: true });
+const captures = new WindowPool({ name: "captures", max: Math.min(4, MAX_WORKERS), keepState: false });
+
+// كل دقيقة: اقفل النوافذ الخاملة اللي مش مستخدمة من دقيقتين (تحرير رام)
+setInterval(() => {
+  try {
+    workers.prune();
+    captures.prune();
+    deleters.prune();
+  } catch {
+    /* تجاهل */
+  }
+}, 60000).unref?.();
 
 // ---------------------------------------------------------------------------
 // طابور الإرجاع (Delete) في الخلفية
@@ -309,10 +474,18 @@ const deleteJobs = [];
 let deleteRunning = 0;
 const deleters = new WindowPool({ name: "deleters", max: MAX_DELETERS, keepState: false });
 
+/** إعادات الإرجاع — بنعيد الفاشل مرة واحدة بس في آخر الجلسة */
+const deleteRetry = new Map();
+
 function enqueueDelete(job) {
   deleteResults.set(job.key, { state: "queued", at: Date.now() });
   deleteJobs.push(job);
   pumpDeletes();
+  return deleteJobs.length;
+}
+
+function deleteBacklog() {
+  return { pending: deleteJobs.length, running: deleteRunning };
 }
 
 function pumpDeletes() {
@@ -329,19 +502,35 @@ function pumpDeletes() {
 async function runDeleteJob(job) {
   const started = Date.now();
   try {
-    const state = await deleters.with(async (win) => {
-      for (const candidate of job.candidates) {
-        if (!candidate || candidate === "main") continue;
-        const loaded = await safeLoad(win, candidate, TIMEOUTS.delete);
-        if (loaded === "error") continue;
-        const hasButton = await run(win, S.waitForSelectorScript("#btn-DeleteClaim", 3500));
-        if (!hasButton) continue;
-        const click = await run(win, S.CLICK_DELETE_SCRIPT);
-        if (click === "clicked") return "done";
-      }
-      return "not-found";
-    }, 30000);
+    // نفس الساب على نفس النافذة (الكوكيز والجلسة موجودة) — أسرع وبيمنع قفز الحالة
+    const state = await deleters.withPref(
+      (win) => win.__rpSab === job.sab,
+      async (win) => {
+        win.__rpSab = job.sab;
+        // صفحة الإرجاع مش محتاجة صور — بنمنعها لتسريع التحميل
+        setResourceMode(win, "search");
+        for (const candidate of job.candidates) {
+          if (!candidate || candidate === "main") continue;
+          const loaded = await safeLoad(win, candidate, TIMEOUTS.delete);
+          if (loaded === "error") continue;
+          const hasButton = await run(win, S.waitForSelectorScript("#btn-DeleteClaim", 3500));
+          if (!hasButton) continue;
+          const click = await run(win, S.CLICK_DELETE_SCRIPT);
+          if (click !== "clicked") continue;
+
+          // تأكيد حقيقي: بنستنى انتهاء الطلب ونقرأ نتيجة الصفحة بدل الافتراض
+          await run(win, S.WAIT_AJAX_IDLE_SCRIPT(5000));
+          const outcome = await run(win, S.DELETE_OUTCOME_SCRIPT);
+          return outcome === "error" ? "error" : "done";
+        }
+        return "not-found";
+      },
+      1500,
+    );
     deleteResults.set(job.key, { state, at: Date.now(), ms: Date.now() - started });
+    if (state === "error" || state === "not-found") {
+      if (!job.retried) deleteRetry.set(job.key, { ...job, retried: true });
+    }
   } catch (err) {
     deleteResults.set(job.key, {
       state: "error",
@@ -349,7 +538,16 @@ async function runDeleteJob(job) {
       at: Date.now(),
       ms: Date.now() - started,
     });
+    if (!job.retried) deleteRetry.set(job.key, { ...job, retried: true });
   }
+}
+
+/** إعادة محاولة الإرجاعات اللي فشلت — مرة واحدة، آخر الجلسة */
+function retryFailedDeletes() {
+  const jobs = [...deleteRetry.values()];
+  deleteRetry.clear();
+  for (const job of jobs) enqueueDelete(job);
+  return jobs.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +556,37 @@ async function runDeleteJob(job) {
 
 async function pageState(win) {
   return run(win, S.PAGE_STATE_SCRIPT);
+}
+
+/**
+ * قفل تسجيل الدخول: من غير القفل ده أكتر من نافذة بتسجّل دخول في نفس اللحظة،
+ * وده بيولّد محاولات فاشلة وبيبطّأ كل حاجة. النافذة اللي بتدخل بتعملها مرة،
+ * والباقي بيستنى نفس الوعد وبيستفيد من الكوكيز المشتركة.
+ */
+let loginPromise = null;
+
+async function loginOnce(win, creds) {
+  if (loginPromise) {
+    await loginPromise.catch(() => {});
+    return "shared";
+  }
+  loginPromise = login(win, creds).finally(() => {
+    loginPromise = null;
+  });
+  await loginPromise;
+  return "logged-in";
+}
+
+/** هل الجلسة لسه شغالة؟ لو اتحوّلت لصفحة الدخول بندخل تاني مرة واحدة */
+async function ensureSession(win, creds) {
+  const check = await run(win, S.SESSION_CHECK_SCRIPT);
+  if (check !== "logged-out") return check;
+  await safeLoad(win, SEARCH_URL);
+  const after = await run(win, S.SESSION_CHECK_SCRIPT);
+  if (after === "ok") return "ok";
+  await loginOnce(win, creds);
+  await safeLoad(win, SEARCH_URL);
+  return "relogin";
 }
 
 async function login(win, credentials) {
@@ -440,7 +669,7 @@ async function ensureSearchPage(win, credentials) {
     const after = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
     if (after) return "loaded";
   }
-  await login(win, credentials);
+  await loginOnce(win, credentials);
   await safeLoad(win, SEARCH_URL);
   const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
   if (!ok) throw new Error("صفحة البحث في نايس دير لم تظهر");
@@ -451,10 +680,11 @@ async function ensureSearchPage(win, credentials) {
 // البحث — نداء واحد لكل ساب
 // ---------------------------------------------------------------------------
 
-async function searchSub(win, { sab, payerId, payerName }) {
+async function searchSub(win, { sab, payerId, payerName, timeoutMs }) {
+  const timeout = Math.max(4000, Math.min(60000, Number(timeoutMs) || TIMEOUTS.search));
   const res = await runStrict(
     win,
-    S.fastSearchScript({ sab, payerId, payerName, timeoutMs: TIMEOUTS.search }),
+    S.fastSearchScript({ sab, payerId, payerName, timeoutMs: timeout }),
   );
 
   if (!res) throw new Error("الصفحة لم ترد على البحث — أعد المحاولة");
@@ -635,6 +865,8 @@ async function processForm(win, job) {
   };
   win.webContents.on("will-navigate", onWillNavigate);
 
+  // صفحة الروشتة محتاجة صور — نسمح بيها في النافذة دي بس
+  setResourceMode(win, "images");
   const popup = armPopupCapture(win);
   let clicked = "";
   try {
@@ -688,13 +920,14 @@ async function processForm(win, job) {
 
     // الإرجاع في الخلفية — مش بيوقف جلب الصورة اللي بعده
     let deleteState = "skipped";
+    let deleteQueue = 0;
     if (!preventDelete) {
       const candidates = [];
       if (href) candidates.push(href.startsWith("http") ? href : `${BASE}${href}`);
       for (const url of popup.urls) candidates.push(url);
 
       if (candidates.length) {
-        enqueueDelete({ key: `${sab}::${reference}`, candidates });
+        deleteQueue = enqueueDelete({ key: `${sab}::${reference}`, sab, reference, candidates });
         deleteState = "background";
       } else {
         const click = await run(win, S.CLICK_DELETE_SCRIPT);
@@ -720,12 +953,18 @@ async function processForm(win, job) {
       height: image.height,
       deleted: deleteState === "done",
       deleteState,
+      deleteQueue,
+      reusedSearch: Boolean(prepared.reused),
       timings,
       notes,
     };
   } finally {
     popup.dispose();
-    if (!win.isDestroyed()) win.webContents.off("will-navigate", onWillNavigate);
+    if (!win.isDestroyed()) {
+      win.webContents.off("will-navigate", onWillNavigate);
+      // رجوع لوضع توفير الموارد بعد ما خلصنا الروشتة
+      setResourceMode(win, "search");
+    }
   }
 }
 
@@ -788,6 +1027,39 @@ async function waWaitReady(timeoutMs = 90000) {
 
 let credentials = { username: "", password: "" };
 
+// الجهاز ما ينامش أثناء الجلسة (500 استمارة × دقائق = الشاشة بتقفل والجلسة بتقطع)
+let powerBlocker = 0;
+
+function setBusy(active) {
+  try {
+    if (active && !powerSaveBlocker.isStarted(powerBlocker)) {
+      powerBlocker = powerSaveBlocker.start("prevent-display-sleep");
+    } else if (!active && powerSaveBlocker.isStarted(powerBlocker)) {
+      powerSaveBlocker.stop(powerBlocker);
+      powerBlocker = 0;
+    }
+  } catch {
+    /* تجاهل */
+  }
+  return Boolean(powerBlocker);
+}
+
+function systemInfo() {
+  const totalMb = Math.round(os.totalmem() / 1024 ** 2);
+  const freeMb = Math.round(os.freemem() / 1024 ** 2);
+  return {
+    maxWorkers: MAX_WORKERS,
+    maxDeleters: MAX_DELETERS,
+    cores: os.cpus()?.length || 0,
+    totalMb,
+    freeMb,
+    workers: workers.max,
+    captures: captures.max,
+    platform: process.platform,
+    electron: process.versions.electron,
+  };
+}
+
 ipcMain.handle("nd:set-credentials", async (_e, payload) => {
   credentials = {
     username: String(payload?.username || ""),
@@ -801,25 +1073,52 @@ ipcMain.handle("nd:set-workers", async (_e, payload) => {
   const n = Math.max(1, Math.min(MAX_WORKERS, Number(payload?.maxWorkers) || 5));
   workers.max = n;
   // نوافذ التصوير بتتوسّع مع نوافذ البحث عشان مفيش نافذة تقف مستنية
-  captures.max = Math.max(2, Math.min(n, 8));
-  return { ok: true, maxWorkers: n, captures: captures.max };
+  captures.max = Math.max(1, Math.min(n, MAX_WORKERS, 8));
+  return { ok: true, maxWorkers: n, captures: captures.max, info: systemInfo() };
 });
+
+/**
+ * الضبط التلقائي: المحرك بيحسب الرقم من القياس الحقيقي، وهنا بنطبّقه.
+ * لو الذاكرة الحرة قربت تخلص بنرفض الزيادة (بدل ما الجهاز يهنّج).
+ */
+ipcMain.handle("nd:tune", async (_e, payload) => {
+  const freeMb = os.freemem() / 1024 ** 2;
+  const asked = Number(payload?.workers) || workers.max;
+  const wanted = Math.max(
+    1,
+    Math.min(MAX_WORKERS, freeMb < 900 ? Math.min(asked, workers.max) : asked),
+  );
+  if (wanted !== workers.max) {
+    workers.max = wanted;
+    captures.max = Math.max(1, Math.min(wanted, MAX_WORKERS, 8));
+    // تقليل فعلي للنوافذ الفاضية عشان الرام تتحرر فورًا
+    if (wanted < workers.size) workers.prune();
+  }
+  return { ok: true, workers: workers.max, captures: captures.max, rejected: wanted !== asked, freeMb: Math.round(freeMb) };
+});
+
+// حظر نوم الجهاز أثناء الجلسة
+ipcMain.handle("nd:busy", async (_e, payload) => ({ ok: true, active: setBusy(Boolean(payload?.active)) }));
 
 ipcMain.handle("nd:warmup", async (_e, payload) => {
   const count = Math.max(1, Math.min(MAX_WORKERS, Number(payload?.workers) || workers.max));
   workers.max = count;
-  captures.max = Math.max(2, Math.min(count, 8));
+  captures.max = Math.max(1, Math.min(count, MAX_WORKERS, 8));
   const started = Date.now();
-  const results = await Promise.all(
-    Array.from({ length: count }, async (_, i) => {
+  setBusy(true);
+  const results = [];
+  for (let i = 0; i < count; i++) {
+    // فتح تدريجي: ١٦ نافذة مرة واحدة بتعمل قفزة في الرام وبتبطّأ أول ساب
+    if (i > 0) await sleep(120);
+    results.push(
+      await (async () => {
       try {
         const win = await workers.acquire(60000);
         try {
           const t0 = Date.now();
           const state = await pageState(win);
           if (!state || !state.hasCode) {
-            await safeLoad(win, SEARCH_URL);
-            await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+            await ensureSearchPage(win, credentials);
           }
           return { index: i, ok: true, ms: Date.now() - t0 };
         } finally {
@@ -828,8 +1127,9 @@ ipcMain.handle("nd:warmup", async (_e, payload) => {
       } catch (err) {
         return { index: i, ok: false, error: String(err?.message || err) };
       }
-    }),
-  );
+      })(),
+    );
+  }
   return {
     ok: results.every((r) => r.ok),
     workers: count,
@@ -848,7 +1148,8 @@ ipcMain.handle("nd:login", async (_e, payload) => {
       await safeLoad(win, SEARCH_URL);
       const ready = await pageState(win);
       if (ready && ready.hasCode) return { ok: true, already: true };
-      await login(win, credentials);
+      await loginOnce(win, credentials);
+      setBusy(true);
       return { ok: true, already: false };
     });
   } catch (err) {
@@ -860,7 +1161,13 @@ ipcMain.handle("nd:status", async () => {
   try {
     return await workers.with(async (win) => {
       const state = await pageState(win);
-      return { ok: true, loggedIn: Boolean(state && state.hasCode), workers: workers.size };
+      return {
+        ok: true,
+        loggedIn: Boolean(state && state.hasCode),
+        workers: workers.size,
+        info: systemInfo(),
+        deletes: deleteBacklog(),
+      };
     }, 20000);
   } catch (err) {
     return { ok: false, loggedIn: false, error: String(err?.message || err) };
@@ -868,14 +1175,16 @@ ipcMain.handle("nd:status", async () => {
 });
 
 ipcMain.handle("nd:search", async (_e, payload) => {
-  const { sab, payerId, payerName } = payload || {};
+  const { sab, payerId, payerName, timeoutMs } = payload || {};
   if (!sab) return { ok: false, error: "رقم الساب مطلوب" };
   const t0 = Date.now();
   try {
     return await workers.with(async (win) => {
       await ensureSearchPage(win, credentials);
-      const res = await searchSub(win, { sab, payerId, payerName });
-      return { ok: true, data: res, ms: Date.now() - t0 };
+      // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
+      const sessionState = await ensureSession(win, credentials);
+      const res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+      return { ok: true, data: res, session: sessionState, ms: Date.now() - t0 };
     });
   } catch (err) {
     return { ok: false, error: String(err?.message || err), ms: Date.now() - t0 };
@@ -911,8 +1220,46 @@ ipcMain.handle("nd:deletes", async () => {
     ok: true,
     pending: deleteJobs.length,
     running: deleteRunning,
+    retryable: deleteRetry.size,
+    backlogLimit: DELETE_BACKLOG_LIMIT,
     results: Object.fromEntries(deleteResults),
   };
+});
+
+/** إعادة محاولة الإرجاعات الفاشلة — آخر الجلسة، مرة واحدة */
+ipcMain.handle("nd:retry-deletes", async () => {
+  const count = retryFailedDeletes();
+  return { ok: true, retried: count };
+});
+
+/** إشعار ويندوز عند انتهاء الجلسة — تعرف إن الشغل خلص وانت بعيد عن الجهاز */
+ipcMain.handle("app:notify", async (_e, payload) => {
+  try {
+    if (!Notification.isSupported()) return { ok: false, error: "الإشعارات غير مدعومة" };
+    const n = new Notification({
+      title: String(payload?.title || "روشتة برو"),
+      body: String(payload?.body || ""),
+      silent: false,
+    });
+    n.on("click", () => {
+      const win = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed());
+      if (win) {
+        win.show();
+        win.focus();
+      }
+    });
+    n.show();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+});
+
+/** فتح مجلد التنزيلات اللي فيه ملفات الإكسل */
+ipcMain.handle("app:open-export-folder", async () => {
+  const dir = app.getPath("downloads");
+  const err = await shell.openPath(dir);
+  return { ok: !err, dir, error: err || undefined };
 });
 
 ipcMain.handle("nd:delete", async (_e, payload) => {
@@ -927,6 +1274,7 @@ ipcMain.handle("nd:delete", async (_e, payload) => {
 });
 
 ipcMain.handle("nd:logout-everything", async () => {
+  setBusy(false);
   await workers.closeAll();
   await session.fromPartition(ND_PARTITION).clearStorageData();
   deleteResults.clear();

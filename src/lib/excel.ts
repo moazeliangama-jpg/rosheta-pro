@@ -1,5 +1,14 @@
 import * as XLSX from "xlsx";
-import type { CaseRecord, FailedRecord, MonthlyCheck, OutreachMessage, PatientRow, SpeedSample } from "./types";
+import type {
+  CaseRecord,
+  FailedRecord,
+  MonthlyCheck,
+  OutreachMessage,
+  PatientRow,
+  SpeedSample,
+  StepSample,
+} from "./types";
+import { STEP_LABEL, bottleneck, slowestSabs, stepsToCsv, summarize } from "./metrics";
 import { dateKey, downloadBlob, safeName } from "./utils";
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -198,6 +207,8 @@ export function exportSessionReport(input: {
   failed: FailedRecord[];
   samples: SpeedSample[];
   sessionMs: number;
+  /** قياس كل خطوة — لو موجودة بيتولّد شيت توقيت + أبطأ ١٠ سابات */
+  steps?: StepSample[];
 }) {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(
@@ -218,6 +229,9 @@ export function exportSessionReport(input: {
     ),
     "الاستمارات",
   );
+  const steps = input.steps ?? [];
+  const bn = bottleneck(steps);
+  const slow = slowestSabs(steps, 10);
   XLSX.utils.book_append_sheet(
     wb,
     XLSX.utils.json_to_sheet([
@@ -225,11 +239,54 @@ export function exportSessionReport(input: {
         "مدة التشغيل (دقيقة)": Math.round(input.sessionMs / 60000),
         "عدد العينات": input.samples.length,
         "أقصى عدد نوافذ": input.samples.length ? Math.max(...input.samples.map((s) => s.workers)) : 0,
+        "الاختناق": bn.step === "idle" ? "" : `${bn.label} (${bn.share}٪)`,
+        "متوسط البحث (مللي)": summarize(steps, "search")[0]?.avg ?? 0,
+        "متوسط الالتقاط (مللي)": summarize(steps, "capture")[0]?.avg ?? 0,
+        "متوسط الإرجاع (مللي)": summarize(steps, "delete")[0]?.avg ?? 0,
       },
     ]),
     "ملخص",
   );
+
+  if (steps.length) {
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        steps.map((x) => ({
+          الوقت: new Date(x.at).toISOString(),
+          الساب: x.sab,
+          الخطوة: STEP_LABEL[x.step] ?? x.step,
+          "مللي ثانية": x.ms,
+          نجحت: x.ok ? "نعم" : "لا",
+          ملاحظة: x.note ?? "",
+        })),
+      ),
+      "توقيت الخطوات",
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        slow.map((r) => ({
+          الساب: r.sab,
+          "الإجمالي (مللي)": r.totalMs,
+          "بحث (مللي)": r.searchMs,
+          "التقاط (مللي)": r.captureMs,
+          "إرجاع (مللي)": r.deleteMs,
+          "صور": r.forms,
+        })),
+      ),
+      "أبطأ السابات",
+    );
+  }
+
   write(wb, `روشتة-برو-تقرير-التشغيل-${dateKey()}.xlsx`);
+}
+
+/** تنزيل CSV بتوقيت كل خطوة — أخف وأسرع من إكسل للتحليل السريع */
+export function exportStepsCsv(steps: StepSample[]) {
+  const csv = stepsToCsv(steps);
+  downloadBlob(new Blob([csv], { type: "text/csv;charset=utf-8" }), `روشتة-برو-توقيت-${dateKey()}.csv`);
+  return steps.length;
 }
 
 export function downloadImage(dataUrl: string, filename: string) {

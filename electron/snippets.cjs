@@ -100,7 +100,9 @@ const PARSE_FN_SRC = `
     const nameEl = document.querySelector('.BeneficiaryName, .beneficiary-name, h4.mb-0');
     const name = nameEl ? rpClean(nameEl.textContent) : '';
 
-    return { forms, phone, name, emptyMsg: rpClean(document.body.innerText || '').slice(0, 400), url: location.href };
+    // قراءة innerText بتجبر الصفحة تحسب Layout كامل — بنعملها بس لما مفيش نتائج
+    const emptyMsg = forms.length ? '' : rpClean(document.body.innerText || '').slice(0, 400);
+    return { forms, phone, name, emptyMsg, url: location.href };
   };
 `;
 
@@ -135,7 +137,10 @@ const fastSearchScript = ({ sab, payerId, payerName, timeoutMs = 15000, emptyWai
   if (sel) {
     const opts = [...sel.options];
     const opt = (wantPayer && opts.find((o) => o.value === wantPayer)) || (wantPayerName && opts.find((o) => (o.textContent || '').trim() === wantPayerName));
-    if (opt) {
+    if (opt && sel.value === opt.value) {
+      // الباير مختار فعلًا — تغييره بيعمل reload للقائمة وبيضيّع وقت
+      payer = { ok: true, value: opt.value, text: (opt.textContent || '').trim(), skipped: true };
+    } else if (opt) {
       sel.value = opt.value;
       sel.dispatchEvent(new Event('change', { bubbles: true }));
       if (window.jQuery) { try { window.jQuery(sel).val(opt.value).trigger('change'); } catch (e) {} }
@@ -188,27 +193,65 @@ const fastSearchScript = ({ sab, payerId, payerName, timeoutMs = 15000, emptyWai
   btn.click();
   timings.searchClickMs = Math.round(performance.now() - t0);
 
-  // 7) انتظار ثبات النتائج: صفوف ظهرت وثبتت، أو رسالة «لا يوجد»
+  // 7) انتظار النتائج: انتهاء طلب الجدول (ajaxComplete) + ثبات عدد الصفوف وآخر صف
+  //    مفيش انتظار أعمى، ومفيش مقارنة innerHTML كامل في كل frame.
+  let ajaxDone = 0;
+  let canWatchAjax = Boolean(window.jQuery && window.jQuery.fn);
+  const onAjax = () => {
+    ajaxDone += 1;
+  };
+  if (canWatchAjax) {
+    try {
+      window.jQuery(document).on('ajaxComplete.rpSearch', onAjax);
+    } catch (e) {
+      canWatchAjax = false;
+    }
+  }
+
+  const clickAt = performance.now();
   const rowCount = () => document.querySelectorAll('#Table tbody tr, #Table2 tbody tr').length;
+  const lastRowSig = () => {
+    const tr =
+      document.querySelector('#Table2 tbody tr:last-child') ||
+      document.querySelector('#Table tbody tr:last-child');
+    if (!tr) return '';
+    const a = tr.querySelector('a.hyperLink');
+    return ((a ? a.textContent : '') || tr.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  };
   const emptyShown = () => document.querySelector('#Table .dataTables_empty, #Table2 .dataTables_empty');
+
+  window.__rpRowSig = '';
+  window.__rpStableAt = 0;
+  window.__rpEmptyAt = 0;
+
   const settled = await rpWait(() => {
     const n = rowCount();
-    if (n > 0) {
-      const html = (document.querySelector('#Table tbody, #Table2 tbody') || {}).innerHTML || '';
-      const prev = window.__rpRowSig;
-      const now = performance.now();
-      if (prev && prev.n === n && prev.html === html && now - prev.at >= 120) return true;
-      if (!prev || prev.n !== n || prev.html !== html) {
-        window.__rpRowSig = { n, html, at: now };
-      }
+    const now = performance.now();
+    // عرفنا إن الطلب خلص؟ (أو مفيش jQuery نراقبه، أو اتأخر زيادة عن اللزوم)
+    const ready = ajaxDone > 0 || !canWatchAjax || now - clickAt > 800;
+    if (!ready) return false;
+
+    if (n === 0) {
+      if (emptyShown()) return 'empty';
+      if (!window.__rpEmptyAt) window.__rpEmptyAt = now;
+      const grace = canWatchAjax ? 300 : emptyWait;
+      return now - window.__rpEmptyAt > grace ? 'empty' : false;
+    }
+
+    const sig = n + '|' + lastRowSig();
+    if (window.__rpRowSig !== sig) {
+      window.__rpRowSig = sig;
+      window.__rpStableAt = now;
       return false;
     }
-    if (emptyShown()) return true;
-    // لو مفيش صفوف ولا رسالة فراغ: بنستنى شوية قبل ما نقول مفيش نتائج
-    if (window.__rpRowSeenAt && performance.now() - window.__rpRowSeenAt > emptyWait) return true;
-    if (!window.__rpRowSeenAt) window.__rpRowSeenAt = performance.now();
-    return false;
+    return now - (window.__rpStableAt || now) >= 80 ? 'rows' : false;
   }, timeout);
+
+  if (canWatchAjax) {
+    try {
+      window.jQuery(document).off('ajaxComplete.rpSearch', onAjax);
+    } catch (e) { /* تجاهل */ }
+  }
 
   const parsed = rpParse();
   timings.totalMs = Math.round(performance.now() - t0);
@@ -218,6 +261,8 @@ const fastSearchScript = ({ sab, payerId, payerName, timeoutMs = 15000, emptyWai
     ok: true,
     ...parsed,
     settled: Boolean(settled),
+    settle: settled || '',
+    ajax: ajaxDone,
     payer,
     timings,
   };
@@ -251,19 +296,36 @@ const clickReferenceScript = (reference) => `(() => {
 // ---------------------------------------------------------------------------
 // انتظار الصورة والتقاطها (Promise بيتحل أول ما الصورة تحمّل)
 // ---------------------------------------------------------------------------
-const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 2200, quality = 0.86 } = {}) => `(async () => {
+const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 1600, quality = 0.84 } = {}) => `(async () => {
   ${HELPERS}
 
+  // أكبر صورة بدون sort: لفة واحدة على document.images في كل frame
   const pickLargest = () => {
-    const imgs = [...document.images].filter((i) => (i.naturalWidth || 0) >= ${Number(minSide)} && (i.naturalHeight || 0) >= ${Number(minSide)});
-    if (!imgs.length) return null;
-    imgs.sort((a, b) => (b.naturalWidth * b.naturalHeight) - (a.naturalWidth * a.naturalHeight));
-    const img = imgs[0];
-    return img.complete && img.naturalWidth > 0 ? img : null;
+    let best = null;
+    let bestArea = 0;
+    for (const img of document.images) {
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      if (w < ${Number(minSide)} || h < ${Number(minSide)}) continue;
+      if (!img.complete) continue;
+      const area = w * h;
+      if (area > bestArea) {
+        bestArea = area;
+        best = img;
+      }
+    }
+    return best;
   };
 
   const t0 = performance.now();
   const img = await rpWait(pickLargest, ${Number(timeoutMs)});
+
+  // انتظار فك الترميز الفعلي بدل sleep عشوائي
+  if (img) {
+    try {
+      if (img.decode) await img.decode();
+    } catch (e) { /* مفيش فك ترميز — بنكمل بالصورة المحمّلة */ }
+  }
 
   if (!img) {
     const anyImg = [...document.images].some((i) => (i.naturalWidth || 0) > 40);
@@ -354,6 +416,36 @@ const CLICK_DELETE_SCRIPT = `(() => {
 
 const HAS_DELETE_SCRIPT = `!!document.querySelector('#btn-DeleteClaim')`;
 
+/** يستنى انتهاء كل طلبات jQuery/ajax في الصفحة (تأكيد إن العملية خلصت فعلًا) */
+const WAIT_AJAX_IDLE_SCRIPT = (timeoutMs = 6000) => `(async () => {
+  ${HELPERS}
+  const jq = window.jQuery;
+  if (!jq || typeof jq.active !== 'number') return 'no-jquery';
+  const idle = await rpWait(() => (jq.active === 0 ? 'idle' : null), ${Number(timeoutMs)});
+  return idle || 'timeout';
+})()`;
+
+/** هل الصفحة اتحولت لشاشة الدخول؟ (الجلسة انتهت في نايس دير) */
+const SESSION_CHECK_SCRIPT = `(() => {
+  if (document.querySelector('#SearchCode')) return 'ok';
+  if (document.querySelector('#UserName, #passwordInput, #loginBTN')) return 'logged-out';
+  const body = (document.body && document.body.innerText) || '';
+  if (/تسجيل الدخول|Sign in|Login/i.test(body.slice(0, 400)) && !document.querySelector('#Table, #Table2')) return 'logged-out';
+  return 'unknown';
+})()`;
+
+/** نتيجة الإرجاع: هل الزرار اختفى/ظهرت رسالة نجاح بعد الضغط؟ */
+const DELETE_OUTCOME_SCRIPT = `(() => {
+  const btn = document.querySelector('#btn-DeleteClaim');
+  const body = (document.body && document.body.innerText) || '';
+  const success = /تم الحذف|تم الإرجاع|تم الالغاء|تم الإلغاء|deleted successfully|success/i.test(body.slice(0, 4000));
+  const error = /خطأ|error|لا يمكن|غير مسموح|can not|cannot/i.test(body.slice(0, 4000));
+  if (success && !error) return 'confirmed';
+  if (error && !success) return 'error';
+  if (!btn) return 'confirmed';
+  return 'unknown';
+})()`;
+
 /** Promise بيتحل أول ما السلكتور يظهر */
 const waitForSelectorScript = (selector, timeoutMs = 8000) => `(async () => {
   ${HELPERS}
@@ -382,6 +474,7 @@ const FIND_IMAGE_LINK_SCRIPT = `(() => {
 const PAGE_STATE_SCRIPT = `(() => ({
   url: location.href,
   hasCode: !!document.querySelector('#SearchCode'),
+  hasLogin: !!document.querySelector('#UserName, #passwordInput, #loginBTN'),
   hasDelete: !!document.querySelector('#btn-DeleteClaim'),
   hasRows: document.querySelectorAll('#Table tbody tr, #Table2 tbody tr').length,
   refs: [...document.querySelectorAll('#Table tbody td:first-child a.hyperLink, #Table2 tbody td.dt-type-numeric a.hyperLink')]
@@ -453,6 +546,9 @@ module.exports = {
   captureImageScript,
   CLICK_DELETE_SCRIPT,
   HAS_DELETE_SCRIPT,
+  WAIT_AJAX_IDLE_SCRIPT,
+  SESSION_CHECK_SCRIPT,
+  DELETE_OUTCOME_SCRIPT,
   CLOSE_MODAL_SCRIPT,
   FIND_IMAGE_LINK_SCRIPT,
   PAGE_STATE_SCRIPT,

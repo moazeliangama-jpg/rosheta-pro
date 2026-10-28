@@ -2,15 +2,23 @@ import { useAppStore } from "./store";
 import { evaluateMonthly, evaluateValidity, isMonthlyForm } from "./eligibility";
 import { bridge, bridgeError, requireBridge } from "./provider";
 import type { CaseRecord, FailedRecord, MonthlyCheck, NdForm, NdSearchResult, PatientRow } from "./types";
-import { clamp, sleep, uid } from "./utils";
+import { clamp, dateKey, sleep, uid } from "./utils";
 import { buildTasks, type Task } from "./tasks";
+import { bottleneck, speedLine, type StepSample, type StepName } from "./metrics";
+import { RetryBudget, backoffDelay, classifyError, errorHint, shouldAbortEarly } from "./retry";
+import { initialWorkers, tuneWorkers } from "./tune";
+import { prepareNote, preparePatients } from "./prepare";
+import { setSaveDelay } from "./store";
 
 export { buildTasks };
 export type { Task };
 
 const MAX_ATTEMPTS = 3;
-/** فاصل إعادة المحاولة — صغير عشان السرعة، البرنامج بيعيد بسرعة بدل ما يستنى */
-const RETRY_BASE_MS = 120;
+/** فاصل إعادة المحاولة الأساسي — backoff أسّي مع عشوائية */
+const RETRY_BASE_MS = 250;
+
+/** جلسة واحدة بس في الوقت نفسه (منع تشغيل جلستين متوازيين) */
+let activeEngine: SessionEngine | null = null;
 
 export const caseKey = (sab: string, source: string, reference: string) => `${sab}::${source}::${reference}`;
 export const deleteKey = (sab: string, reference: string) => `${sab}::${reference}`;
@@ -98,6 +106,20 @@ export class SessionEngine {
   private pollInFlight = false;
   private lastPoll = 0;
 
+  /** قياس كل خطوة — بيتفرّغ للمخزن كل نبضة بدل تحديث مع كل عملية */
+  private steps: StepSample[] = [];
+  private budget = new RetryBudget(150);
+  private consecutiveFailures = 0;
+  private avgRecent: number[] = [];
+  private prevAvg = 0;
+  private cap = 12;
+  private searchTimeoutMs = 18000;
+  private lastSab = "";
+  private missingCount = 0;
+  /** عدّاد إعادة استخدام نتائج البحث (بدل بحث جديد) — بيثبت إن goBack بيشتغل */
+  private reusedSearches = 0;
+  private freshSearches = 0;
+
   constructor(onTick: Listener = () => {}) {
     this.onTick = onTick;
   }
@@ -107,13 +129,48 @@ export class SessionEngine {
   }
 
   private log(level: "info" | "ok" | "warn" | "error", msg: string) {
-    useAppStore.getState().logLine(level, msg);
+    // رسالة الخطأ بتتحول لنص فيه الحل في سطر (مش نص الخطأ الخام)
+    useAppStore.getState().logLine(level, level === "error" ? errorHint(msg) : msg);
+  }
+
+  /** تسجيل خطوة في القياس (بيتجمّع وبيتفرّغ في النبضة) */
+  private record(sab: string, step: StepName, ms: number, ok = true, note?: string) {
+    if (!Number.isFinite(ms) || ms < 0) return;
+    this.steps.push({ at: Date.now(), sab, step, ms: Math.round(ms), ok, note });
+    this.avgRecent.push(Math.round(ms));
+    if (this.avgRecent.length > 40) this.avgRecent.shift();
+  }
+
+  private flushSteps() {
+    if (!this.steps.length) return;
+    const batch = this.steps;
+    this.steps = [];
+    useAppStore.getState().pushSteps(batch);
+  }
+
+  /** نقطة استكمال: آخر ساب اكتمل بيتحفظ فورًا */
+  private checkpoint(sab: string) {
+    this.lastSab = sab;
+    useAppStore.getState().patchSession({ lastSab: sab });
+  }
+
+  /** فشل ساب: بيزوّد عدّاد الفشل المتتالي عشان نوقف لو الإعداد غلط */
+  private failSab(reason: string, sab: string, name: string, workplace: string) {
+    this.consecutiveFailures += 1;
+    this.fail(reason, "بحث", sab, name, workplace, "");
+    if (shouldAbortEarly(this.consecutiveFailures, this.doneSubs)) {
+      this.cancelled = true;
+      this.log(
+        "error",
+        `أول ${this.consecutiveFailures} سابات فشلوا كلهم — وقفت تلقائيًا بدل ما أكرر نفس الخطأ. راجع بيانات الدخول والباير.`,
+      );
+    }
   }
 
   private requestedWorkers() {
     const s = this.settings();
-    if (s.workerChoice === "auto") return 8;
-    return clamp(Number(s.workerChoice), 1, 16);
+    // الوضع التلقائي بيبدأ من نص سقف الجهاز وبعدها بيتظبط من القياس الحقيقي
+    return initialWorkers(s.workerChoice, this.cap);
   }
 
   async syncBridge() {
@@ -125,6 +182,11 @@ export class SessionEngine {
       password: s.niceDeerPass,
       maxWorkers: this.requestedWorkers(),
     });
+    // سقف النوافذ من إمكانيات الجهاز الحقيقية (رام وأنوية)
+    const res = await b.setWorkers(this.requestedWorkers());
+    const info = res?.data?.info;
+    if (info?.maxWorkers) this.cap = Math.max(1, info.maxWorkers);
+    this.workers = this.requestedWorkers();
   }
 
   async start(patients: PatientRow[], opts: { fresh: boolean; scan?: boolean; images?: boolean }) {
@@ -133,6 +195,13 @@ export class SessionEngine {
     const doScan = opts.scan !== false;
     const doImages = opts.images !== false;
     const s0 = this.settings();
+
+    // منع تشغيل جلستين في نفس الوقت (يدوي + تلقائي مثلًا)
+    if (activeEngine && activeEngine !== this) {
+      this.log("warn", "فيه جلسة شغالة بالفعل — استنى تخلص أو أوقفها الأول.");
+      return;
+    }
+    activeEngine = this;
 
     this.cancelled = false;
     this.paused = false;
@@ -145,16 +214,52 @@ export class SessionEngine {
     this.captureMsTotal = 0;
     this.captureCount = 0;
     this.keyToId.clear();
+    this.steps = [];
+    this.avgRecent = [];
+    this.prevAvg = 0;
+    this.budget = new RetryBudget(150);
+    this.consecutiveFailures = 0;
+    this.missingCount = 0;
+    this.reusedSearches = 0;
+    this.freshSearches = 0;
     this.startedAt = Date.now();
-    this.workers = this.requestedWorkers();
+
+    // أثناء التشغيل بنأجل كتابة الحالة (٣ ثواني) عشان الشغل ما يتعطلش،
+    // وبنفحص الحالة المحفوظة من يوم تاني عشان الكاش ما يبقاش قديم.
+    setSaveDelay(3000);
 
     await this.syncBridge();
+    this.searchTimeoutMs = s0.turboMode ? 14000 : 18000;
 
     if (opts.fresh) {
       store.clearFailed();
       store.clearSamples();
+      store.clearSteps();
       store.clearOutreach();
       store.clearLog();
+    }
+
+    // تجهيز القائمة: تنظيف + حذف مكرر + تخطي المتجرد النهاردة + الأثقل الأول
+    const prepared = preparePatients(patients, {
+      cache: useAppStore.getState().sabCache,
+      day: dateKey(),
+      force: opts.fresh,
+      // ٦٦) استكمال: مش بنعيد اللي خلص قبل الوقفة
+      resumeAfter: opts.fresh ? undefined : useAppStore.getState().session.lastSab || undefined,
+    });
+    // بعد ما استخدمنا الكاش في الترتيب والتخطي، بنمسح اللي مش من النهاردة
+    store.clearSabCache(dateKey());
+    if (!prepared.list.length) {
+      this.log("warn", `مفيش سابات محتاجة شغل. ${prepareNote(prepared.stats)}`);
+      activeEngine = null;
+      return;
+    }
+    const note = prepareNote(prepared.stats);
+    if (note) this.log("info", note);
+    patients = prepared.list;
+    this.missingCount = prepared.stats.missing;
+    if (this.missingCount) {
+      this.log("info", `${this.missingCount} ساب كان «غير موجود» النهاردة — اتخطى لتوفير الوقت.`);
     }
 
     store.patchSession({
@@ -178,7 +283,14 @@ export class SessionEngine {
       deletePending: 0,
       decisions: [],
       lastTuneAt: Date.now(),
+      lastSab: "",
+      bottleneck: "",
+      autoTuned: 0,
+      stuckWindows: 0,
     });
+
+    // الجهاز ما ينامش أثناء الجلسة
+    void b.busy(true);
 
     this.timer = setInterval(() => this.tick(), 1200);
 
@@ -206,7 +318,12 @@ export class SessionEngine {
       if (!this.cancelled && doImages) await this.imagePhase();
     }
 
-    await this.resolveDeletes();
+    // دورة تانية للفاشلين: مرة واحدة بس آخر الجلسة
+    if (!this.cancelled && doImages) await this.retryFailedImages();
+
+    // الإرجاعات الفاشلة بتتعاد مرة واحدة، وبعدها بنستنى الطابور يخلص
+    await b.retryDeletes();
+    await this.resolveDeletes(120000);
 
     this.finish();
   }
@@ -224,6 +341,11 @@ export class SessionEngine {
       forms: this.images,
       workers: this.workers,
     });
+
+    // سطر الاختناق الحقيقي من القياس (مش تخمين)
+    const line = speedLine(this.steps.length ? this.steps : store.steps);
+    const bn = bottleneck(this.steps.length ? this.steps : store.steps);
+
     store.patchSession({
       subsDone: this.doneSubs,
       formsDone: this.doneForms,
@@ -233,9 +355,50 @@ export class SessionEngine {
       avgCaptureMs: this.captureCount ? Math.round(this.captureMsTotal / this.captureCount) : 0,
       formsPerMin: Math.round(rate * 10) / 10,
       etaMin: rate > 0 ? Math.max(0, Math.round(((store.session.formsTotal - this.doneForms) / rate) * 10) / 10) : null,
+      bottleneck: bn.step === "idle" ? "" : line,
     });
+
+    this.flushSteps();
+    void this.autoTune();
     void this.pollDeletes();
     this.onTick();
+  }
+
+  /**
+   * الضبط التلقائي: كل ١٥ ثانية بنقرر نزوّد نافذة أو نقلّل،
+   * على أساس المتوسط الحقيقي ونسبة الفشل — مش رقم ثابت في الإعدادات.
+   */
+  private async autoTune() {
+    const store = useAppStore.getState();
+    if (!store.session.autoWorkers) return;
+    if (Date.now() - store.session.lastTuneAt < 15000) return;
+    if (this.avgRecent.length < 4) return;
+    const avg = Math.round(this.avgRecent.reduce((n, v) => n + v, 0) / this.avgRecent.length);
+    const decision = tuneWorkers({
+      workers: this.workers,
+      cap: this.cap,
+      avgMs: avg,
+      prevAvgMs: this.prevAvg,
+      successes: Math.max(1, this.doneForms + this.doneSubs - this.failures),
+      failures: this.failures,
+    });
+    this.prevAvg = avg;
+    store.patchSession({ lastTuneAt: Date.now() });
+    if (!decision.changed) return;
+
+    this.workers = clamp(decision.workers, 1, this.cap);
+    const b = bridge();
+    if (b) {
+      const res = await b.tune(this.workers);
+      const applied = res?.data?.workers;
+      if (typeof applied === "number") this.workers = applied;
+      if (res?.data?.rejected) {
+        this.log("warn", "الذاكرة الحرة قليلة — ضبط النوافذ اتمنع للحفاظ على استقرار الجهاز.");
+        return;
+      }
+    }
+    store.patchSession({ workers: this.workers, autoTuned: store.session.autoTuned + 1 });
+    this.log("info", `ضبط تلقائي: ${this.workers} نافذة — ${decision.reason}.`);
   }
 
   // -------------------------------------------------------------------------
@@ -261,23 +424,41 @@ export class SessionEngine {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
       const t0 = Date.now();
       try {
-        const res = await b.searchSub({ sab: patient.sab, payerId: s.payerId, payerName: s.payerName });
+        const res = await b.searchSub({
+          sab: patient.sab,
+          payerId: s.payerId,
+          payerName: s.payerName,
+          timeoutMs: this.searchTimeoutMs,
+        });
         if (!res.ok) throw new Error(bridgeError(res, "فشل البحث في نايس دير"));
         const data = res.data as NdSearchResult;
-        this.searchMsTotal += res.ms ?? Date.now() - t0;
+        const searchMs = res.ms ?? Date.now() - t0;
+        this.searchMsTotal += searchMs;
         this.searchCount += 1;
+        this.record(patient.sab, "search", searchMs, true, `استمارات: ${data.forms?.length ?? 0}`);
+
+        // البحث بقى أسرع من المتوقع؟ نقلّل المهلة شوية (مهلة تكيّفية)
+        const avg = this.searchCount ? this.searchMsTotal / this.searchCount : searchMs;
+        this.searchTimeoutMs = clamp(Math.round(avg * 4 + 4000), 8000, 20000);
 
         const phone = (data.phone || patient.phone || "").trim();
         const effective: PatientRow = { ...patient, phone };
 
         if (data.empty || !data.forms.length) {
           store.logLine("warn", `الساب ${patient.sab}: ${data.note || "مفيش استمارات"}`);
+          store.setSabCache(patient.sab, { day: dateKey(), forms: 0, missing: true });
+          this.consecutiveFailures = 0;
           this.doneSubs += 1;
+          this.checkpoint(patient.sab);
           return [];
         }
 
         const cases = data.forms.map((f) => toCase(effective, f, s));
-        for (const c of cases) store.upsertCase(c);
+        // دفعة واحدة بدل تحديث لكل استمارة
+        store.upsertCases(cases);
+
+        // كاش اليوم: الساب اتجرد — مش هيتكرر في نفس اليوم
+        store.setSabCache(patient.sab, { day: dateKey(), forms: cases.length });
 
         const monthlyForms = data.forms
           .filter((f) => isMonthlyForm(f))
@@ -298,16 +479,39 @@ export class SessionEngine {
           "ok",
           `الساب ${patient.sab} (${patient.name}): ${cases.length} استمارة — ${validCount} داخل المدة في ${Date.now() - t0} مللي.`,
         );
+        this.consecutiveFailures = 0;
         this.doneSubs += 1;
+        this.checkpoint(patient.sab);
         return cases;
       } catch (err) {
         lastError = err instanceof Error ? err.message : "خطأ غير معروف";
-        if (/غير موجود|مش موجود/.test(lastError)) break;
-        await sleep(RETRY_BASE_MS * attempt);
+        const kind = classifyError(lastError);
+        this.record(patient.sab, "search", Date.now() - t0, false, lastError.slice(0, 120));
+
+        // «غير موجود»: مفيش فايدة من الإعادة — بنسجّله وبنكمّل
+        if (kind === "permanent") {
+          store.setSabCache(patient.sab, { day: dateKey(), forms: 0, missing: true });
+          break;
+        }
+        // الجلسة انتهت: ندخل تاني مرة واحدة ونعيد
+        if (kind === "session" && attempt === 1) {
+          this.log("warn", `الساب ${patient.sab}: انتهت الجلسة — إعادة تسجيل الدخول.`);
+          try {
+            await b.login();
+          } catch {
+            /* المحاولة التالية هتوضّح */
+          }
+          continue;
+        }
+        // ميزانية الإعادات: ما نضربش السيرفر بمئات المحاولات
+        if (!this.budget.take()) break;
+        await sleep(backoffDelay(attempt, RETRY_BASE_MS));
       }
     }
 
-    this.fail(lastError || "فشل بعد ٣ محاولات", "بحث", patient.sab, patient.name, patient.workplace, "");
+    this.failSab(lastError || "فشل بعد ٣ محاولات", patient.sab, patient.name, patient.workplace);
+    this.doneSubs += 1;
+    this.checkpoint(patient.sab);
     return [];
   }
 
@@ -395,9 +599,14 @@ export class SessionEngine {
     const store = useAppStore.getState();
     let lastError = "";
 
+    // ١٥) لو الصورة موجودة فعلًا في التخزين، مفيش داعي نفتح الروشتة تاني
+    const current = store.cases[c.id];
+    if (current?.rx.status === "ready") return;
+
     store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !this.cancelled; attempt++) {
+      const t0 = Date.now();
       try {
         const res = await b.fetchFormImage({
           sab: c.sab,
@@ -416,24 +625,47 @@ export class SessionEngine {
           deleteState: res.data.deleteState || "unknown",
         });
 
+        if (res.data.reusedSearch) this.reusedSearches += 1;
+        else this.freshSearches += 1;
+
         const timings = res.data.timings || {};
         if (typeof timings.searchMs === "number") {
           this.searchMsTotal += timings.searchMs;
           this.searchCount += 1;
+          if (timings.searchMs > 0) this.record(c.sab, "search", timings.searchMs, true, "بحث جوه الروشتة");
         }
+        if (typeof timings.clickMs === "number") this.record(c.sab, "click", timings.clickMs, true);
         if (typeof timings.captureMs === "number") {
           this.captureMsTotal += timings.captureMs;
           this.captureCount += 1;
+          this.record(c.sab, "capture", timings.captureMs, true, res.data.method);
+        }
+
+        // ضغط طابور الإرجاع: لو تراكم بكتير بنستنى شوية بدل ما نكبّر الطابور
+        if ((res.data as { deleteQueue?: number }).deleteQueue) {
+          await this.waitForDeleteBacklog();
         }
 
         this.keyToId.set(deleteKey(c.sab, c.reference), c.id);
         this.images += 1;
+        this.consecutiveFailures = 0;
         return;
       } catch (err) {
         lastError = err instanceof Error ? err.message : "خطأ غير معروف";
-        // أخطاء مش هتتحسن بإعادة المحاولة
-        if (/غير موجود|مش موجود|الساب والرقم المرجعي/.test(lastError)) break;
-        await sleep(RETRY_BASE_MS * attempt);
+        const kind = classifyError(lastError);
+        this.record(c.sab, "capture", Date.now() - t0, false, lastError.slice(0, 120));
+
+        if (kind === "permanent") break;
+        if (kind === "session" && attempt === 1) {
+          try {
+            await b.login();
+          } catch {
+            /* المحاولة الجاية */
+          }
+          continue;
+        }
+        if (!this.budget.take()) break;
+        await sleep(backoffDelay(attempt, RETRY_BASE_MS));
         store.setRxStatus(c.id, {
           status: "loading",
           attempts: attempt,
@@ -445,6 +677,36 @@ export class SessionEngine {
 
     store.setRxStatus(c.id, { status: "failed", attempts: MAX_ATTEMPTS, reason: lastError, updatedAt: Date.now() });
     this.fail(lastError || "فشل جلب الصورة بعد ٣ محاولات", "صورة", c.sab, c.patientName, c.workplace, c.reference);
+  }
+
+  /** لو طابور الإرجاع اتخنق، بنهدّي جلب الصور شوية بدل تكديس أكتر */
+  private async waitForDeleteBacklog(limit = 60, maxWaitMs = 15000) {
+    const b = bridge();
+    if (!b) return;
+    const started = Date.now();
+    while (Date.now() - started < maxWaitMs) {
+      const res = await b.deletes();
+      const pending = (res.data?.pending || 0) + (res.data?.running || 0);
+      useAppStore.getState().patchSession({ deletePending: pending });
+      if (pending <= limit) return;
+      await sleep(400);
+    }
+  }
+
+  /** دورة تانية للصور اللي فشلت — مرة واحدة، آخر الجلسة */
+  private async retryFailedImages() {
+    const s = this.settings();
+    const store = useAppStore.getState();
+    const failed = Object.values(store.cases).filter(
+      (c) => c.rx.status === "failed" && (c.valid || s.includeInvalid),
+    );
+    if (!failed.length) return;
+    this.log("info", `محاولة أخيرة لـ ${failed.length} روشتة متعثرة.`);
+    for (const c of failed) {
+      if (this.cancelled) return;
+      store.setRxStatus(c.id, { status: "loading", attempts: 0, updatedAt: Date.now() });
+      await this.fetchImage(c);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -573,8 +835,13 @@ export class SessionEngine {
   private finish() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.flushSteps();
     const store = useAppStore.getState();
     const elapsedMin = Math.max((Date.now() - this.startedAt) / 60000, 0.02);
+    const samples = [...this.steps, ...store.steps];
+    const bn = bottleneck(samples);
+    const line = speedLine(samples);
+
     store.patchSession({
       state: "done",
       endedAt: Date.now(),
@@ -586,11 +853,52 @@ export class SessionEngine {
       avgSearchMs: this.searchCount ? Math.round(this.searchMsTotal / this.searchCount) : 0,
       avgCaptureMs: this.captureCount ? Math.round(this.captureMsTotal / this.captureCount) : 0,
       etaMin: 0,
+      lastSab: this.lastSab,
+      bottleneck: bn.step === "idle" ? "" : line,
     });
+
+    const mins = Math.max(1, Math.round(elapsedMin));
     this.log(
       "ok",
-      `انتهى التشغيل — ${this.images} صورة، ${this.failures} متعثر، متوسط البحث ${store.session.avgSearchMs} مللي، متوسط الالتقاط ${store.session.avgCaptureMs} مللي.`,
+      `انتهى التشغيل في ${mins} دقيقة — ${this.images} صورة، ${this.failures} متعثر، ${this.doneSubs} ساب. ${line}`,
     );
+    // ٣) قياس إعادة البحث بعد goBack: نسبة إعادة الاستخدام = كفاءة الرجوع
+    if (this.reusedSearches + this.freshSearches > 0) {
+      const pct = Math.round((this.reusedSearches / (this.reusedSearches + this.freshSearches)) * 100);
+      this.log(
+        "info",
+        `إعادة استخدام نتائج البحث: ${this.reusedSearches} من ${this.reusedSearches + this.freshSearches} (${pct}٪) — الباقي احتاج بحث جديد.`,
+      );
+    }
+
+    // الجهاز يرجع لطبيعته + الحفظ يرجع سريع بعد ما الشغل خلص
+    setSaveDelay(600);
+    activeEngine = null;
+    const b = bridge();
+    if (b) {
+      void b.busy(false);
+      // تصدير تقرير الجلسة تلقائيًا (اختياري من الإعدادات)
+      if (this.settings().autoExport) {
+        void import("./excel").then((x) =>
+          x.exportSessionReport({
+            cases: Object.values(useAppStore.getState().cases),
+            failed: useAppStore.getState().failed,
+            samples: useAppStore.getState().samples,
+            sessionMs: Date.now() - this.startedAt,
+            steps: Object.values(useAppStore.getState().steps ?? []),
+          }),
+        );
+      }
+    }
+
+    // إشعار ويندوز: تعرف إن الجلسة خلصت حتى لو بعيد عن الجهاز
+    if (b) {
+      void b.notify({
+        title: `خلصت الجلسة — ${this.images} صورة`,
+        body: `${this.doneSubs} ساب · ${this.failures} متعثر · ${mins} دقيقة. ${line}`,
+      });
+    }
+
     store.setScreen("decision");
     this.onTick();
   }

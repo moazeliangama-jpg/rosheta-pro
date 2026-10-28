@@ -41,6 +41,8 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
   const [loginNote, setLoginNote] = useState("");
   const [waState, setWaState] = useState("closed");
   const [probeSab, setProbeSab] = useState("");
+  // ٧٣) الإعدادات المتقدمة مطوية افتراضيًا — زرار التشغيل هو الواجهة
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [probeResult, setProbeResult] = useState<string>("");
   const [error, setError] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -341,23 +343,38 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
             </div>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
-            <div className="text-xs text-white/50">عدد نوافذ نايس دير</div>
-            <div className="mt-1.5 flex gap-1">
-              {(["auto", "5", "8", "12", "16"] as const).map((v) => (
-                <button
-                  key={v}
-                  onClick={() => setSettings({ workerChoice: v })}
-                  className={cn(
-                    "flex-1 rounded-md border px-1.5 py-1 text-[11px] font-semibold transition",
-                    settings.workerChoice === v
-                      ? "border-teal-400/60 bg-teal-500/20 text-teal-200"
-                      : "border-white/10 text-white/50 hover:bg-white/5",
-                  )}
-                >
-                  {v === "auto" ? "تلقائي" : v}
-                </button>
-              ))}
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-white/50">عدد نوافذ نايس دير</div>
+              <button
+                onClick={() => setShowAdvanced((v) => !v)}
+                className="text-[10px] text-teal-300/80 hover:text-teal-200"
+              >
+                {settings.workerChoice === "auto" ? "تحديد يدوي" : "تلقائي"}
+              </button>
             </div>
+            {settings.workerChoice === "auto" ? (
+              // ٧٤) في التلقائي بنخفي الأرقام — البرنامج بيقرر من سرعة الجهاز والقياس
+              <div className="mt-1.5 text-[11px] leading-relaxed text-white/45">
+                البرنامج بيبدأ بعدد مناسب لجهازك (رام وأنوية) ويزوّد أو يقلّل حسب السرعة الحقيقية.
+              </div>
+            ) : (
+              <div className="mt-1.5 flex gap-1">
+                {(["auto", "5", "8", "12", "16"] as const).map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => setSettings({ workerChoice: v })}
+                    className={cn(
+                      "flex-1 rounded-md border px-1.5 py-1 text-[11px] font-semibold transition",
+                      settings.workerChoice === v
+                        ? "border-teal-400/60 bg-teal-500/20 text-teal-200"
+                        : "border-white/10 text-white/50 hover:bg-white/5",
+                    )}
+                  >
+                    {v === "auto" ? "تلقائي" : v}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <Toggle
             checked={!settings.preventDelete}
@@ -366,18 +383,59 @@ export function SetupScreen({ onScan, onImages }: { onScan: () => void; onImages
             hint="#btn-DeleteClaim — زي طريقة الصرف"
           />
           <Toggle
-            checked={settings.includeInvalid}
-            onChange={(v) => setSettings({ includeInvalid: v })}
-            label="جلب صور خارج المدة"
-            hint="افتراضيًا بنجيب الصور للمستمارات داخل المدة بس"
-          />
-          <Toggle
             checked={settings.turboMode}
             onChange={(v) => setSettings({ turboMode: v })}
             label="الوضع المرعب ⚡ (Turbo)"
             hint="تسخين النوافذ + إعادة استخدام نتائج البحث + إرجاع Delete في الخلفية"
           />
         </div>
+
+        {/* ٧٣) الإعدادات المتقدمة مطوية: زرار «ابدأ» هو الواجهة الأساسية */}
+        <button
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="mt-3 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-1.5 text-[11px] text-white/50 hover:bg-white/5"
+        >
+          {showAdvanced ? "إخفاء الإعدادات المتقدمة ▲" : "إعدادات متقدمة ▼ (خارج المدة · تصدير تلقائي)"}
+        </button>
+
+        {showAdvanced ? (
+          <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <Toggle
+              checked={settings.includeInvalid}
+              onChange={(v) => setSettings({ includeInvalid: v })}
+              label="جلب صور خارج المدة"
+              hint="افتراضيًا بنجيب الصور للمستمارات داخل المدة بس"
+            />
+            <Toggle
+              checked={settings.autoExport}
+              onChange={(v) => setSettings({ autoExport: v })}
+              label="تصدير تقرير الجلسة تلقائيًا"
+              hint="إكسل توقيت الخطوات + أبطأ السابات في آخر الجلسة"
+            />
+            <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
+              <div className="text-xs text-white/50">الحد اليومي للرسائل</div>
+              <input
+                type="number"
+                min={10}
+                max={2000}
+                value={settings.dailySendLimit}
+                onChange={(e) => setSettings({ dailySendLimit: Math.max(10, Number(e.target.value) || 300) })}
+                className="mt-1 w-24 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-center text-sm tabular-nums text-white focus:outline-none"
+              />
+            </div>
+            <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5">
+              <div className="text-xs text-white/50">عشوائية فاصل الإرسال ±٪</div>
+              <input
+                type="number"
+                min={0}
+                max={80}
+                value={settings.sendJitterPct}
+                onChange={(e) => setSettings({ sendJitterPct: Math.max(0, Math.min(80, Number(e.target.value) || 0)) })}
+                className="mt-1 w-24 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-center text-sm tabular-nums text-white focus:outline-none"
+              />
+            </div>
+          </div>
+        ) : null}
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Button size="lg" onClick={startScan} disabled={session.state === "scanning" || session.state === "running"}>

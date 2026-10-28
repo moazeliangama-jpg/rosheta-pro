@@ -23,7 +23,9 @@ import type { CaseRecord, MonthlyCheck } from "../lib/types";
 import { Badge, Button, Card, EmptyState, SectionTitle, Stat } from "../components/ui";
 import { RxImage, RxLightbox, SOURCE_LABEL } from "../components/RxViewer";
 import { cn } from "../lib/utils";
-import { exportAnalysis, exportMonthly, exportPreApproval, exportWithDrugs } from "../lib/excel";
+type ExcelModule = typeof import("../lib/excel");
+// مكتبة الإكسل بتتحمّل وقت التصدير بس — فتح البرنامج أسرع بكتير
+const excel = () => import("../lib/excel") as Promise<ExcelModule>;
 
 type Tab = "all" | "undecided" | "drugs" | "nodrugs" | "failed" | "invalid";
 
@@ -47,7 +49,8 @@ export function DecisionScreen({
   const logLine = useAppStore((s) => s.logLine);
   const patients = useAppStore((s) => s.patients);
 
-  const [tab, setTab] = useState<Tab>("all");
+  // ٧٨) الافتراضي «لم يُحسم» — الشاشة بتفتح على اللي محتاج شغل مش على الأرشيف
+  const [tab, setTab] = useState<Tab>("undecided");
   const [query, setQuery] = useState("");
   const [retrying, setRetrying] = useState<Set<string>>(new Set());
   const [showMonthly, setShowMonthly] = useState(true);
@@ -78,6 +81,46 @@ export function DecisionScreen({
   }, [all, query, tab]);
 
   const viewer = viewerId ? cases[viewerId] ?? null : null;
+  const lastDecisionId = useAppStore((s) => s.lastDecisionId);
+  const lastDecision = lastDecisionId ? cases[lastDecisionId] : null;
+
+  /** ٧٧) الروشتة اللي بعدها في نفس الفلتر — عشان القرار يمشي بسرعة */
+  const nextCase = (fromId?: string) => {
+    const list = filtered.filter((c) => c.valid && c.hasDrugs === null && c.rx.status === "ready");
+    const idx = fromId ? list.findIndex((c) => c.id === fromId) : -1;
+    return list[idx + 1] ?? (idx === -1 ? list[0] : undefined);
+  };
+
+  const decideAndNext = (c: CaseRecord, value: "available" | "unavailable") => {
+    setHasDrugs(c.id, value);
+    const next = nextCase(c.id);
+    if (next) setViewer(next.id);
+    else setViewer(null);
+  };
+
+  // ٧٦) اختصارات لوحة المفاتيح: ١ بها دواء، ٢ بدون، مسافة = اللي بعدها
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const current = viewerId ? cases[viewerId] : null;
+      if (e.key === "1" && current) {
+        e.preventDefault();
+        decideAndNext(current, "available");
+      } else if (e.key === "2" && current) {
+        e.preventDefault();
+        decideAndNext(current, "unavailable");
+      } else if (e.key === " ") {
+        e.preventDefault();
+        setViewer(nextCase(viewerId ?? undefined)?.id ?? null);
+      } else if (e.key === "Escape" && viewerId) {
+        setViewer(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const handleRetry = async (c: CaseRecord) => {
     setRetrying((prev) => new Set(prev).add(c.id));
@@ -126,7 +169,7 @@ export function DecisionScreen({
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
           <SectionTitle hint={`${monthlyRows.length} ساب`}>الشهري متاح أم لا — أكّد لكل ساب</SectionTitle>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" onClick={() => exportMonthly(monthlyRows)}>
+            <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportMonthly(monthlyRows))}>
               <Download className="h-3.5 w-3.5" /> إكسل الشهري
             </Button>
             <button
@@ -219,15 +262,24 @@ export function DecisionScreen({
               </button>
             ))}
           </div>
-          <Button size="sm" variant="ghost" onClick={() => exportAnalysis(all)}>
+          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportAnalysis(all))}>
             <FileSpreadsheet className="h-3.5 w-3.5" /> جرد الاستمارات
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => exportWithDrugs(all)}>
+          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportWithDrugs(all))}>
             <Pill className="h-3.5 w-3.5" /> بها دواء
           </Button>
-          <Button size="sm" variant="ghost" onClick={() => exportPreApproval(all)}>
+          <Button size="sm" variant="ghost" onClick={() => void excel().then((x) => x.exportPreApproval(all))}>
             <ShieldCheck className="h-3.5 w-3.5" /> Pre-Approval
           </Button>
+          {/* ٧٩) استكمال من مكان الوقوف */}
+          {lastDecision && !viewerId ? (
+            <Button size="sm" variant="ghost" onClick={() => setViewer(lastDecision.id)}>
+              <ChevronLeft className="h-3.5 w-3.5" /> استكمال من {lastDecision.patientName || lastDecision.sab}
+            </Button>
+          ) : null}
+          <span className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[10px] text-white/40">
+            1 بها دواء · 2 بدون · مسافة التالي
+          </span>
         </div>
 
         {filtered.length === 0 ? (
@@ -251,7 +303,10 @@ export function DecisionScreen({
                 retrying={retrying.has(c.id)}
                 onOpen={() => setViewer(c.id)}
                 onRetry={() => void handleRetry(c)}
-                onDrugs={(v) => setHasDrugs(c.id, v)}
+                onDrugs={(v) => {
+                  if (viewerId === c.id) decideAndNext(c, v);
+                  else setHasDrugs(c.id, v);
+                }}
               />
             ))}
           </div>

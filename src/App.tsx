@@ -238,11 +238,21 @@ build-exe.bat       # لتوليد مثبّت ويندوز`}
       </main>
 
       {session.state === "done" && screen !== "decision" ? (
-        <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2">
+        <div className="fixed bottom-4 left-1/2 z-30 -translate-x-1/2 space-y-1.5">
+          {/* ٨٢) ملخص نهاية الجلسة في سطرين */}
+          <div className="rounded-xl border border-white/10 bg-[#0b1518]/95 px-4 py-2 text-center text-[11px] text-white/60 shadow-xl backdrop-blur">
+            <div>
+              {session.images} صورة جاهزة · {session.subsDone} ساب · {session.failures} متعثر ·{" "}
+              {session.startedAt && session.endedAt
+                ? `${Math.round((session.endedAt - session.startedAt) / 60000)} دقيقة`
+                : ""}
+            </div>
+            {session.bottleneck ? <div className="text-white/40">{session.bottleneck}</div> : null}
+          </div>
           <Button
             size="lg"
             onClick={() => setScreen("decision")}
-            className="rounded-full shadow-xl"
+            className="w-full rounded-full shadow-xl"
           >
             التشغيل انتهى — افتح شاشة القرار ({Object.values(cases).filter((c) => c.rx.status === "ready").length} صورة جاهزة)
           </Button>

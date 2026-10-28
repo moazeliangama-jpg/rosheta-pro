@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("roshetta", {
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
   setWorkers: (maxWorkers) => ipcRenderer.invoke("nd:set-workers", { maxWorkers }),
+  tune: (workers) => ipcRenderer.invoke("nd:tune", { workers }),
+  busy: (active) => ipcRenderer.invoke("nd:busy", { active }),
   warmup: (workersCount) => ipcRenderer.invoke("nd:warmup", { workers: workersCount }),
   login: (payload) => ipcRenderer.invoke("nd:login", payload),
   status: () => ipcRenderer.invoke("nd:status"),
@@ -15,6 +17,7 @@ contextBridge.exposeInMainWorld("roshetta", {
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),
   deleteForm: (payload) => ipcRenderer.invoke("nd:delete", payload),
   deletes: () => ipcRenderer.invoke("nd:deletes"),
+  retryDeletes: () => ipcRenderer.invoke("nd:retry-deletes"),
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
 
@@ -29,5 +32,7 @@ contextBridge.exposeInMainWorld("roshetta", {
   },
 
   closeAll: () => ipcRenderer.invoke("nd:close-all"),
+  openExportFolder: () => ipcRenderer.invoke("app:open-export-folder"),
+  notify: (payload) => ipcRenderer.invoke("app:notify", payload),
   openExternal: (url) => ipcRenderer.invoke("app:open-external", url),
 });

@@ -136,6 +136,16 @@ export interface SpeedSample {
 
 export type SessionState = "idle" | "scanning" | "running" | "paused" | "done";
 
+/** عيّنة قياس لخطوة واحدة — بتتحفظ مع الجلسة وبتبني تقرير السرعة */
+export interface StepSample {
+  at: number;
+  sab: string;
+  step: "search" | "click" | "capture" | "delete" | "scan";
+  ms: number;
+  ok: boolean;
+  note?: string;
+}
+
 export interface SessionMeta {
   state: SessionState;
   phase: "idle" | "scan" | "images";
@@ -157,6 +167,14 @@ export interface SessionMeta {
   deletePending: number;
   decisions: string[];
   lastTuneAt: number;
+  /** آخر ساب اكتمل — نقطة استكمال لو الجلسة اتقطعت */
+  lastSab: string;
+  /** سطر الاختناق الحالي: «البحث» / «التقاط الصورة» … */
+  bottleneck: string;
+  /** عدد مرات الضبط التلقائي للنوافذ */
+  autoTuned: number;
+  /** وقت الإنقاذ: نافذة متعلقة اتدمّرت */
+  stuckWindows: number;
 }
 
 export interface OutreachMessage {
@@ -203,6 +221,12 @@ export interface Settings {
   replyNegative: string;
   replyPostpone: string;
   sendDelaySec: number;
+  /** حد يومي للرسائل — حماية من الحظر */
+  dailySendLimit: number;
+  /** نسبة العشوائية حوالين فاصل الإرسال (±٪) */
+  sendJitterPct: number;
+  /** تصدير تقرير الجلسة تلقائيًا في آخر الجلسة */
+  autoExport: boolean;
   lastReportDate: string;
   lastAutoSessionDate: string;
   lastScanAt: number;
