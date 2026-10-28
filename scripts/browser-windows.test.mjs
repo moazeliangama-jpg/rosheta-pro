@@ -44,6 +44,19 @@ test("أزرار الشريط بتنفّذ أوامر حقيقية على الم
   assert.match(body, /setAlwaysOnTop\(/, "زرار التثبيت لازم يثبّت النافذة فوق فعلًا");
 });
 
+test("شورت كت المتصفح شغالة والمحتوى هو اللي مستجيب لها", () => {
+  const start = main.indexOf("function wireChrome(win)");
+  assert.ok(start > 0, "مش لاقي wireChrome");
+  const block = main.slice(start, main.indexOf("function layoutContent(win)", start));
+  assert.match(block, /content\.on\("before-input-event"/, "لازم الشورت كت تتقرا من محتوى الصفحة نفسه");
+  assert.match(block, /key === "F5"/);
+  assert.match(block, /input\.control \|\| input\.meta/, "Ctrl+R لازم تكون مدعومة");
+  assert.match(block, /key === "ArrowLeft"/);
+  assert.match(block, /key === "ArrowRight"/);
+  assert.match(block, /event\.preventDefault\(\)/, "لازم نمنع الصفحة من استهلاك الاختصار");
+  assert.match(block, /content\.reload\(\)/, "F5 لازم يعمل reload حقيقي");
+});
+
 test("كل نوافذ الأتمتة ليها جلسات منفصلة", () => {
   assert.match(main, /const partition = `persist:nd-\$\{this\.name\}-\$\{/, "كل نافذة لازم تأخد partition خاص");
   // نسخ الهوية بس — كوكي الجلسة بيفضل مستقل لكل نافذة

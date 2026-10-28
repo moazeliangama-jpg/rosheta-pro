@@ -789,6 +789,46 @@ function wireChrome(win) {
   ]) {
     content.on(event, push);
   }
+  /**
+   * شورت كت المتصفح الحقيقية وهي شغالة على الصفحة نفسها:
+   * التركيز غالبًا جوه المحتوى (مش على الشريط)، فمن غير الربط ده `F5` و`Alt+←`
+   * كانوا بيضيعوا على الصفحة. هنا بننفذهم على المحتوى ونمنع الصفحة من استهلاكهم.
+   */
+  content.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown") return;
+    const key = String(input.key || "");
+    const lower = key.toLowerCase();
+    const nh = content.navigationHistory;
+    const back = () => {
+      if (nh && typeof nh.canGoBack === "function" ? nh.canGoBack() : content.canGoBack?.()) {
+        if (nh && typeof nh.goBack === "function") nh.goBack();
+        else content.goBack();
+      }
+    };
+    const forward = () => {
+      if (nh && typeof nh.canGoForward === "function" ? nh.canGoForward() : content.canGoForward?.()) {
+        if (nh && typeof nh.goForward === "function") nh.goForward();
+        else content.goForward();
+      }
+    };
+    if (key === "F5" || ((input.control || input.meta) && lower === "r" && !input.shift && !input.alt)) {
+      event.preventDefault();
+      content.reload();
+      push();
+      return;
+    }
+    if (!input.alt) return;
+    if (key === "ArrowLeft") {
+      event.preventDefault();
+      back();
+      push();
+    } else if (key === "ArrowRight") {
+      event.preventDefault();
+      forward();
+      push();
+    }
+  });
+
   win.on("resize", () => {
     layoutContent(win);
     push();
