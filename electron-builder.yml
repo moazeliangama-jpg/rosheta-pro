@@ -31,7 +31,8 @@ files:
 
 extraMetadata:
   main: electron/main.cjs
-  version: 1.0.0
+  # مفيش `version` هنا: لو اتكتب رقم ثابت، اسم الملفات والتحديث التلقائي بيتلغبطوا
+  # (الملف يطلع 1.0.0 والبرنامج نفسه 1.0.8). النسخة بتتاخد من package.json.
   description: نظام تحليل استمارات نايس دير — روشتة برو
   author: Roshetta Pro
 

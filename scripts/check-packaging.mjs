@@ -92,6 +92,15 @@ for (const file of ["build-exe.bat", "start.bat"]) {
   if (nonAscii > 0) problems.push(`${file}: فيه ${nonAscii} بايت غير ASCII — cmd.exe مش بيفهم العربي كويس`);
 }
 
+// رقم نسخة ثابت في extraMetadata بيلغّي نسخة package.json: اسم الملفات بيطلع
+// ١.٠.٠ والتحديث التلقائي بيقارن غلط. النسخة مصدرها package.json وبس.
+{
+  const extra = cfg.extraMetadata || {};
+  if (extra.version && String(extra.version) !== String(JSON.parse(readFileSync("package.json", "utf8")).version)) {
+    problems.push(`extraMetadata.version = ${extra.version} — لازم تتشال، النسخة بتتاخد من package.json`);
+  }
+}
+
 if (problems.length) {
   console.error("مشاكل في إعدادات التغليف:");
   for (const p of problems) console.error(" - " + p);
