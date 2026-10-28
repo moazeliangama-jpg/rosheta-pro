@@ -181,15 +181,34 @@ let saveDirty = false;
 let savedAt = 0;
 const saveListeners = new Set<() => void>();
 
+/**
+ * ⚠️ لازم الكائن ده يفضل **بنفس المرجع** طول ما القيم ما اتغيّرتش.
+ * `useSyncExternalStore` بيقارن بـ`Object.is`: لو رجّعنا `{dirty, savedAt}` جديد
+ * كل نداء، React بيعيد الرسم بلا توقف (React error #185 — Maximum update depth).
+ */
+let saveSnapshot: { dirty: boolean; savedAt: number } = { dirty: saveDirty, savedAt };
+
 function emitSave() {
   for (const fn of saveListeners) fn();
 }
+
+/** تحديث الحالة الظاهرة — بيغيّر المرجع بس لو فيه تغيير حقيقي */
+export function markSaveState(dirty: boolean, at: number = savedAt) {
+  if (saveSnapshot.dirty === dirty && saveSnapshot.savedAt === at) return;
+  saveDirty = dirty;
+  savedAt = at;
+  saveSnapshot = { dirty, savedAt };
+  emitSave();
+}
+
 export function subscribeSave(fn: () => void) {
   saveListeners.add(fn);
-  return () => saveListeners.delete(fn);
+  return () => {
+    saveListeners.delete(fn);
+  };
 }
 export function getSaveState() {
-  return { dirty: saveDirty, savedAt };
+  return saveSnapshot;
 }
 
 function debouncedStorage() {
@@ -202,15 +221,15 @@ function debouncedStorage() {
       timer = null;
     }
     if (!last) return;
+    let ok = true;
     try {
       localStorage.setItem(last[0], last[1]);
-      saveDirty = false;
-      savedAt = Date.now();
     } catch (err) {
+      ok = false;
       console.warn("تعذر حفظ الحالة محليًا", err);
     }
     last = null;
-    emitSave();
+    if (ok) markSaveState(false, Date.now());
   };
 
   if (typeof window !== "undefined") {
@@ -230,10 +249,7 @@ function debouncedStorage() {
     },
     setItem: (key: string, value: string) => {
       last = [key, value];
-      if (!saveDirty) {
-        saveDirty = true;
-        emitSave();
-      }
+      markSaveState(true);
       if (timer) return;
       timer = setTimeout(() => {
         timer = null;

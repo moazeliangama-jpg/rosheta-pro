@@ -50,3 +50,16 @@ test("الإشعارات: الإجراء بيتنفّذ مرة واحدة بال
   assert.equal(runs, 1);
   assert.equal(getToasts().length, 0);
 });
+
+test("الإشعارات: حالة React ثابتة المرجع بين التغييرات (مفيش حلقة رسم)", () => {
+  // نفس قاعدة useSyncExternalStore: المرجع مايتغيّرش إلا لو المحتوى اتغيّر
+  clearToasts();
+  const empty1 = getToasts();
+  const empty2 = getToasts();
+  assert.equal(empty1, empty2);
+  pushToast("info", "أ", { ttl: 0 });
+  const withOne = getToasts();
+  assert.notEqual(withOne, empty1);
+  assert.equal(getToasts(), withOne);
+  clearToasts();
+});
