@@ -724,6 +724,12 @@ export class SessionEngine {
         this.doneForms += 1;
         this.onTick();
       }
+      // نفس قاعدة «متصفح واحد لكل ساب» في المرحلة المستقلة كمان
+      try {
+        await bridge()?.releaseSab({ sab: task.sab });
+      } catch {
+        /* تحرير النافذة مش حرج */
+      }
     });
   }
 
