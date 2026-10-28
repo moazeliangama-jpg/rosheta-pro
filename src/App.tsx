@@ -96,6 +96,27 @@ export default function App() {
     return () => clearTimeout(t);
   }, [hydrateImages, setLoggedIn]);
 
+  // أحداث مباشرة من نوافذ نايس دير — المستخدم بيشوف الخطوة اللي بتتنفذ دلوقتي
+  useEffect(() => {
+    const b = bridge();
+    if (!b?.onStep) return;
+    const off = b.onStep((line) => {
+      if (!line || !line.message) return;
+      useAppStore.getState().pushLive({
+        at: Number(line.at) || Date.now(),
+        message: String(line.message).slice(0, 300),
+        ref: line.ref ? String(line.ref).slice(0, 60) : undefined,
+      });
+    });
+    return () => {
+      try {
+        off();
+      } catch {
+        /* تجاهل */
+      }
+    };
+  }, []);
+
   // ٦٧) متابعة حالة الشبكة
   useEffect(() => {
     const onUp = () => {

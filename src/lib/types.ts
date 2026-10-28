@@ -275,6 +275,13 @@ export interface Profile {
   messageMonthly: string;
 }
 
+/** سطر من الأحداث المباشرة لنوافذ نايس دير (خطوات حقيقية اتنفّذت فعلًا) */
+export interface LiveLine {
+  at: number;
+  message: string;
+  ref?: string;
+}
+
 export interface BridgeResult<T = unknown> {
   ok: boolean;
   error?: string;

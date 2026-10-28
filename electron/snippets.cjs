@@ -11,8 +11,14 @@
 // ---------------------------------------------------------------------------
 const HELPERS = `
   const rpSleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const rpRaf = (cb) => (window.requestAnimationFrame ? window.requestAnimationFrame(cb) : setTimeout(cb, 16));
-  // يستنى شرط يتحقق ويرجع قيمته بأسرع ما يمكن
+  /**
+   * الانتظار بيتعمل بمؤقت (setTimeout) مش بـ requestAnimationFrame.
+   *
+   * ليه؟ لأن rAF بيستنى «فريم» من محرّك الرسم، والنوافذ اللي بتفتح في الخلفية
+   * (أو اللي المتصفح بيعتبرها مخفية/مغطاة) مابتدّيش فريمات خالص — فكل استنى
+   * كان بيعلّق لحد المهلة ويرجع فاضي. ده كان سبب إن النوافذ «بتفتح ومش بتعمل
+   * أي خطوة». المؤقتات بتشتغل عادي لأن backgroundThrottling: false.
+   */
   const rpWait = (pred, timeout) => new Promise((resolve) => {
     const started = performance.now();
     const tick = () => {
@@ -20,7 +26,7 @@ const HELPERS = `
       try { value = pred(); } catch (e) { value = null; }
       if (value) { resolve(value); return; }
       if (performance.now() - started >= timeout) { resolve(null); return; }
-      rpRaf(tick);
+      setTimeout(tick, 40);
     };
     tick();
   });
@@ -126,6 +132,11 @@ const fastSearchScript = ({ sab, payerId, payerName, timeoutMs = 15000, emptyWai
 
   const t0 = performance.now();
   const timings = {};
+
+  // 0) لو الصفحة رجعت لفورم الدخول: الجلسة انتهت — بنقولها صريح بدل مهلة فاضية
+  if (document.querySelector('#UserName, #passwordInput')) {
+    return { ok: false, error: 'NEED_LOGIN', message: 'انتهت الجلسة — الصفحة رجعت لتسجيل الدخول في نافذة نايس دير' };
+  }
 
   // 1) الصفحة جاهزة؟
   const codeInput = await rpWait(() => document.querySelector('#SearchCode'), timeout);
@@ -278,6 +289,11 @@ const quickParseScript = `(() => { ${HELPERS} ${PARSE_FN_SRC} return rpParse(); 
 // ---------------------------------------------------------------------------
 const clickReferenceScript = (reference) => `(() => {
   const target = ${JSON.stringify(String(reference))};
+  // بنسجّل الصور اللي موجودة قبل الضغط، عشان اللي بيظهر بعده بالظبط هو الروشتة
+  try {
+    window.__rpImgsBefore = [...document.images].map((i) => i.currentSrc || i.src || '');
+    window.__rpModalBefore = Boolean(document.querySelector('.modal.show, [role=dialog], .fancybox-container, .offcanvas.show'));
+  } catch (e) { window.__rpImgsBefore = []; window.__rpModalBefore = false; }
   for (const id of ['#Table', '#Table2']) {
     const table = document.querySelector(id);
     if (!table) continue;
@@ -455,6 +471,111 @@ const captureImageScript = ({ timeoutMs = 12000, minSide = 180, maxWidth = 1600,
   }
 
   return { failed: true, reason: 'protected', src, ...size, diag, ms: Math.round(performance.now() - t0) };
+})()`;
+
+/**
+ * التقاط صورة الروشتة اللي بتظهر **جوه نفس الصفحة** بعد الضغط على الرقم المرجعي
+ * (مودال / أوفرلاي / صورة اتضافت في الصفحة بدون تنقّل).
+ *
+ * ليه ده مهم؟ لأن الاعتماد على «نافذة منبثقة» أو «تنقّل» بس مش كفاية: بعض
+ * استمارات نايس دير بتفتح الروشتة في مودال في نفس الصفحة، وساعتها ما كانش
+ * فيه أي مسار بيلقط الصورة → قرار «صورة الروشتة لم تُلتقط».
+ *
+ * الشرط متعمّد إنه ضيّق: الصورة لازم تكون **جديدة بعد الضغط** أو جوه مودال ظاهر،
+ * وحجمها معقول — عشان ما نرجعش لوجو الصفحة ونقول عليه روشتة.
+ */
+const captureNewImageScript = ({ timeoutMs = 9000, minSide = 260, maxWidth = 1600, quality = 0.86 } = {}) => `(async () => {
+  ${HELPERS}
+  const MIN = ${Number(minSide)};
+  const t0 = performance.now();
+  const before = new Set(window.__rpImgsBefore || []);
+
+  const visible = (el) => {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const st = getComputedStyle(el);
+    return r.width > 60 && r.height > 60 && st.visibility !== 'hidden' && st.display !== 'none' && Number(st.opacity || 1) > 0.1;
+  };
+  const inModal = (el) => {
+    try {
+      return Boolean(el.closest('.modal, .modal-dialog, [role="dialog"], .fancybox-container, .swal2-container, .offcanvas, .lightbox, .mfp-content'));
+    } catch (e) { return false; }
+  };
+
+  const pick = () => {
+    const imgs = [...document.images];
+    let best = null;
+    let bestArea = 0;
+    for (const img of imgs) {
+      const src = img.currentSrc || img.src || '';
+      const w = img.naturalWidth || 0;
+      const h = img.naturalHeight || 0;
+      if (w < MIN || h < MIN) continue;
+      if (!img.complete) continue;
+      const fresh = src && !before.has(src);
+      const modalNow = inModal(img) && visible(img);
+      if (!fresh && !modalNow) continue;
+      const area = w * h;
+      if (area > bestArea) { bestArea = area; best = img; }
+    }
+    if (best) return { kind: 'img', el: best, w: best.naturalWidth, h: best.naturalHeight };
+
+    for (const c of document.querySelectorAll('canvas')) {
+      if ((c.width || 0) < MIN || (c.height || 0) < MIN) continue;
+      if (!inModal(c) && !visible(c)) continue;
+      return { kind: 'canvas', el: c, w: c.width, h: c.height };
+    }
+    return null;
+  };
+
+  const found = await rpWait(pick, ${Number(timeoutMs)});
+  if (!found) {
+    return { failed: true, reason: 'no-new-image', diag: { images: document.images.length, url: location.href } };
+  }
+
+  if (found.kind === 'canvas') {
+    try {
+      const dataUrl = found.el.toDataURL('image/jpeg', ${Number(quality)});
+      if (dataUrl && dataUrl.length > 2000) {
+        return { dataUrl, width: found.w, height: found.h, method: 'canvas-inline', ms: Math.round(performance.now() - t0) };
+      }
+    } catch (e) { /* محمي */ }
+  }
+
+  const img = found.el;
+  const src = (img.currentSrc || img.src || '').toString();
+  try {
+    if (img.decode) await img.decode();
+  } catch (e) { /* بنكمل */ }
+
+  // ١) رسم على canvas (بيشتغل مع أغلب الصور)
+  try {
+    const maxW = ${Number(maxWidth)};
+    const scale = img.naturalWidth > maxW ? maxW / img.naturalWidth : 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.naturalWidth * scale);
+    canvas.height = Math.round(img.naturalHeight * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    let dataUrl = canvas.toDataURL('image/jpeg', ${Number(quality)});
+    if (!dataUrl || dataUrl.length < 3000) dataUrl = canvas.toDataURL('image/png');
+    if (dataUrl && dataUrl.length > 2000) {
+      return {
+        dataUrl,
+        width: found.w,
+        height: found.h,
+        src,
+        method: 'inline-canvas',
+        ms: Math.round(performance.now() - t0),
+      };
+    }
+  } catch (e) { /* الصورة محمية (tainted) — بنجيبها من الشبكة */ }
+
+  // ٢) نفس الصورة من الشبكة بنفس الكوكيز (بيحصل في main عبر fetchImageViaSession)
+  if (src) return { srcUrl: src, width: found.w, height: found.h, ms: Math.round(performance.now() - t0) };
+
+  return { failed: true, reason: 'protected', diag: { images: document.images.length } };
 })()`;
 
 // ---------------------------------------------------------------------------
@@ -744,6 +865,7 @@ module.exports = {
   quickParseScript,
   clickReferenceScript,
   captureImageScript,
+  captureNewImageScript,
   CLICK_DELETE_SCRIPT,
   HAS_DELETE_SCRIPT,
   WAIT_AJAX_IDLE_SCRIPT,

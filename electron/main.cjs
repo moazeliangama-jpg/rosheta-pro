@@ -392,12 +392,20 @@ async function preflight() {
 // ---------------------------------------------------------------------------
 
 async function run(win, code) {
-  if (!win || win.isDestroyed()) return null;
-  try {
-    return await win.webContents.executeJavaScript(code, true);
-  } catch {
-    return null;
+  // التنقّل بيقتل سياق الصفحة، وexecuteJavaScript ساعتها بيرمي — من غير إعادة
+  // محاولة كان السكربت بيرجع null في صمت والخطوة «مابتحصلش».
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (!win || win.isDestroyed()) return null;
+    try {
+      return await win.webContents.executeJavaScript(code, true);
+    } catch (err) {
+      const message = String(err && err.message ? err.message : err);
+      const transient = /execution context|destroyed|navigat|script failed|render frame/i.test(message);
+      if (!transient || attempt === 1) return null;
+      await sleep(220);
+    }
   }
+  return null;
 }
 
 /** وعد بمهلة: لو الصفحة اتعلّقت، بنفكّ التعليق بدل ما الجلسة تقف */
@@ -565,6 +573,8 @@ function firstSuccess(promises, timeoutMs) {
  */
 let backgroundWindows = true;
 
+const ND_WINDOW_PRELOAD = path.join(__dirname, "nd-window-preload.cjs");
+
 function hiddenWindowOptions(extra = {}) {
   return {
     show: false,
@@ -574,11 +584,14 @@ function hiddenWindowOptions(extra = {}) {
     webPreferences: {
       partition: ND_PARTITION,
       backgroundThrottling: false,
+      // الرسم بيشتغل حتى قبل الظهور — من غيره capturePage بيرجّع صورة بيضاء
+      paintWhenInitiallyHidden: true,
+      // بيمنع alert/confirm/prompt من إنها تجمّد الصفحة (النافذة في الخلفية)
+      preload: ND_WINDOW_PRELOAD,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
       images: true,
-      disableDialogs: true,
       ...extra,
     },
   };
@@ -992,6 +1005,29 @@ class LoginError extends Error {
 
 let loginWin = null;
 
+/** النافذة الرئيسية (الواجهة) — بنبعت منها الأحداث المباشرة */
+let appWindow = null;
+
+/**
+ * بث خطوة حقيقية للواجهة عشان المستخدم يشوف النوافذ بتعمل إيه دلوقتي.
+ * مش حالة وهمية: كل سطر هنا اتنفّذ فعلًا في نافذة نايس دير.
+ */
+function liveStep(message, extra = {}) {
+  const line = {
+    at: Date.now(),
+    message: String(message == null ? "" : message).slice(0, 300),
+    ...(extra && typeof extra === "object" ? { ref: extra.ref ? String(extra.ref).slice(0, 60) : undefined } : {}),
+  };
+  try {
+    if (appWindow && !appWindow.isDestroyed() && !appWindow.webContents.isDestroyed()) {
+      appWindow.webContents.send("nd:step", line);
+    }
+  } catch {
+    /* لو الواجهة اتقفلت، مفيش داعي */
+  }
+  return line;
+}
+
 function getLoginWindow() {
   if (loginWin && !loginWin.isDestroyed()) return loginWin;
   loginWin = new BrowserWindow({
@@ -1004,6 +1040,8 @@ function getLoginWindow() {
     webPreferences: {
       partition: ND_PARTITION,
       backgroundThrottling: false,
+      // نفس حماية النوافذ التانية: رسائل الموقع بتتسجل بدل ما تجمّد الصفحة
+      preload: ND_WINDOW_PRELOAD,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -1395,7 +1433,11 @@ async function searchSub(win, { sab, payerId, payerName, timeoutMs }) {
   );
 
   if (!res) throw new Error("الصفحة لم ترد على البحث — أعد المحاولة");
-  if (!res.ok) throw new Error(res.message || "فشل البحث في نايس دير");
+  if (!res.ok) {
+    const err = new Error(res.message || "فشل البحث في نايس دير");
+    err.code = res.error || "SEARCH_FAILED";
+    throw err;
+  }
 
   // الباير مهم: لو القائمة موجودة والباير مش فيها، النتائج ممكن تكون لباير تاني
   if (res.payer && res.payer.ok === false && res.payer.reason === "no-option") {
@@ -1403,6 +1445,7 @@ async function searchSub(win, { sab, payerId, payerName, timeoutMs }) {
     throw new Error(`الباير المطلوب غير موجود في القائمة. المتاح: ${names}`);
   }
 
+  liveStep(`الساب ${cleanSab}: ${(res.forms || []).length} استمارة`, { ref: cleanSab });
   const forms = (res.forms || []).map((f, index) => ({
     ...f,
     index,
@@ -1467,6 +1510,7 @@ function capLog(ref, message) {
   } catch {
     /* السجل مش حرج */
   }
+  liveStep(String(message).slice(0, 300), { ref });
 }
 
 /**
@@ -1876,7 +1920,26 @@ async function processForm(win, job) {
         return captureImageInWindow(win, { timeoutMs: 6000 });
       })();
 
-      image = await firstSuccess([popup.childPromise, mainPromise], TIMEOUTS.image + 4000);
+      // مسار تالت: الروشتة بتفتح **جوه نفس الصفحة** (مودال/أوفرلاي) — من غيره
+      // كان بيحصل «النافذة فتحت ومفيش صورة» لأن مفيش تنقّل ولا نافذة منبثقة.
+      const inlinePromise = (async () => {
+        await sleep(250);
+        if (win.isDestroyed()) return null;
+        const res = await run(win, S.captureNewImageScript({ timeoutMs: 7000 }));
+        if (res && res.srcUrl) {
+          capLog(ref, "صورة روشتة ظهرت جوه الصفحة — بجيبها من الشبكة بنفس الجلسة");
+          const net = await fetchImageViaSession(win, res.srcUrl, { referrer: SEARCH_URL });
+          if (net && net.dataUrl) return { ...net, method: `${net.method}-inline` };
+          return null;
+        }
+        if (res && res.dataUrl) {
+          capLog(ref, `صورة روشتة جوه الصفحة (${res.method || "inline"})`);
+          return res;
+        }
+        return null;
+      })();
+
+      image = await firstSuccess([popup.childPromise, mainPromise, inlinePromise], TIMEOUTS.image + 4000);
       if (image) capLog(ref, `الصورة اتجابت من نافذة/تنقّل (${image.method || "؟"})`);
     }
 
@@ -2253,6 +2316,48 @@ ipcMain.handle("nd:set-window-mode", async (_e, payload) => {
 /** آخر خطوات محاولة الدخول — للتشخيص */
 ipcMain.handle("nd:login-trace", async () => ({ ok: true, data: { trace: LG.summarizeTrace(loginTrace, 40) } }));
 
+/**
+ * رسائل الموقع (alert/confirm/prompt) اللي اتمنعت من إنها تجمّد النافذة:
+ * بتتسجل هنا وكمان بتظهر في الواجهة — غالبًا فيها سبب رفض الموقع نفسه.
+ */
+ipcMain.on("nd:page-dialog", (_e, payload) => {
+  const kind = String(payload?.kind || "dialog").slice(0, 20);
+  const message = String(payload?.message || "").slice(0, 400);
+  const answer = payload?.answer == null || payload.answer === "" ? "" : ` → ${String(payload.answer).slice(0, 40)}`;
+  const text = `الموقع قال (${kind}): ${message || "بدون نص"}${answer}`;
+  appendLog("info", text);
+  capLog("page-dialog", text);
+});
+
+/**
+ * «شوف النوافذ» — بيطلّع نوافذ الأتمتة فوق كل حاجة في الشاشة عشان المستخدم
+ * يشوف المتصفح بيعمل الخطوات بنفسه. بيقفل الوضع ده وبيرجّعها للخلفية.
+ */
+ipcMain.handle("nd:watch-windows", async (_e, payload) => {
+  const on = payload?.on !== false;
+  let count = 0;
+  for (const [index, win] of workers.windows.entries()) {
+    if (!win || win.isDestroyed()) continue;
+    try {
+      if (on) {
+        win.setSkipTaskbar(false);
+        win.setBounds(backgroundBounds(index));
+        win.setAlwaysOnTop(true, "normal");
+        win.showInactive();
+      } else {
+        win.setAlwaysOnTop(false);
+        win.setSkipTaskbar(true);
+        presentInBackground(win, index);
+      }
+      count += 1;
+    } catch {
+      /* تجاهل النافذة اللي اتحرّكت */
+    }
+  }
+  liveStep(on ? `وضع المتابعة: ${count} نافذة ظاهرة قدامك` : `رجّعت ${count} نافذة للخلفية`);
+  return { ok: true, data: { on, windows: count } };
+});
+
 // ---------------------------------------------------------------------------
 // ٩٦) التحديث من GitHub Releases: فحص + تنزيل + تشغيل المثبّت
 // ---------------------------------------------------------------------------
@@ -2514,7 +2619,20 @@ ipcMain.handle("nd:search", async (_e, payload) => {
       await ensureSearchPage(win, credentials);
       // كشف انتهاء الجلسة قبل البحث بدل ما نفشل ونعيد بلا داعي
       const sessionState = await ensureSession(win, credentials);
-      const res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+      let res;
+      try {
+        res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+      } catch (err) {
+        // الجلسة انتهت في نص الشغل: دخول تاني مرة واحدة بنفس النافذة وبعدها بحث
+        if (err && err.code === "NEED_LOGIN") {
+          traceStep(`الساب ${sab}: الجلسة انتهت — إعادة دخول في نفس النافذة`);
+          await loginOnce(win, credentials);
+          await ensureSearchPage(win, credentials);
+          res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+        } else {
+          throw err;
+        }
+      }
       return { ok: true, data: res, session: sessionState, ms: Date.now() - t0 };
     });
   } catch (err) {
@@ -3086,6 +3204,10 @@ function createMainWindow() {
   if (devUrl) win.loadURL(devUrl);
   else win.loadFile(path.join(__dirname, "..", "dist", "index.html"));
 
+  appWindow = win;
+  win.on("closed", () => {
+    if (appWindow === win) appWindow = null;
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (SEC.isSafeExternalUrl(url)) void shell.openExternal(url);
     return { action: "deny" };
