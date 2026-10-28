@@ -2771,6 +2771,14 @@ ipcMain.handle("nd:search", async (_e, payload) => {
           await loginOnce(win, credentials);
           await ensureSearchPage(win, credentials);
           res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
+        } else if (err && err.code === "PRECONDITION") {
+          // النافذة مش على صفحة البحث (صفحة قديمة/مودال/تحويل) — تحميل جديد
+          // وإعادة المحاولة مرة واحدة بدل ما الساب يفشل على صفحة غلط.
+          traceStep(`الساب ${sab}: النافذة مش على صفحة البحث — تحميل جديد ومحاولة تانية`);
+          await safeLoad(win, SEARCH_URL, TIMEOUTS.pageLoad);
+          const ready = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
+          if (!ready) throw err;
+          res = await searchSub(win, { sab, payerId, payerName, timeoutMs });
         } else {
           throw err;
         }
