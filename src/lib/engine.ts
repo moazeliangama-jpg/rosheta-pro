@@ -108,6 +108,8 @@ export class SessionEngine {
   private captureMsTotal = 0;
   private captureCount = 0;
   private keyToId = new Map<string, string>();
+  /** إرجاعات اتلغت لأن المستخدم لغى العملية — بتظهر في شاشة القرار */
+  private cancelStoppedDeletes = 0;
   private pollInFlight = false;
   private lastPoll = 0;
 
@@ -239,6 +241,7 @@ export class SessionEngine {
 
     this.cancelled = false;
     this.paused = false;
+    this.cancelStoppedDeletes = 0;
     this.failures = 0;
     this.doneSubs = 0;
     this.doneForms = 0;
@@ -362,9 +365,22 @@ export class SessionEngine {
     // دورة تانية للفاشلين: مرة واحدة بس آخر الجلسة
     if (!this.cancelled && doImages) await this.retryAllFailed();
 
-    // الإرجاعات الفاشلة بتتعاد مرة واحدة، وبعدها بنستنى الطابور يخلص
-    await b.retryDeletes();
-    await this.resolveDeletes(120000);
+    if (this.cancelled) {
+      // المستخدم لغى العملية → أي إرجاع لسه في الطابور بيتلغى (مفيش حذف خالص)
+      try {
+        const res = await b.cancelDeletes({ reason: "المستخدم لغى العملية" });
+        this.cancelStoppedDeletes = res?.data?.cancelled ?? this.cancelStoppedDeletes;
+      } catch {
+        /* الجسر مش موجود أو القناة اتقفلت — الإلغاء المحلي كفاية */
+      }
+      const n = this.cancelStoppedDeletes;
+      this.log(n ? "warn" : "info", n ? `اتلغى ${n} إرجاع — مفيش حذف لأن العملية اتلغت.` : "العملية اتلغت قبل أي إرجاع.");
+      useAppStore.getState().patchSession({ cancelStoppedDeletes: n });
+    } else {
+      // الإرجاعات الفاشلة بتتعاد مرة واحدة، وبعدها بنستنى الطابور يخلص
+      await b.retryDeletes();
+      await this.resolveDeletes(120000);
+    }
 
     this.finish();
   }
@@ -937,6 +953,13 @@ export class SessionEngine {
     this.cancelled = true;
     this.paused = false;
     if (this.timer) clearInterval(this.timer);
+    // الإلغاء لازم يوصل للمحرك فورًا: مفيش #btn-DeleteClaim يتضغط بعد كده
+    try {
+      const res = await bridge()?.cancelDeletes({ reason: "المستخدم أوقف التشغيل" });
+      this.cancelStoppedDeletes = res?.data?.cancelled ?? this.cancelStoppedDeletes;
+    } catch {
+      /* لو القناة مش متاحة، بنكمل بالإلغاء المحلي */
+    }
     const store = useAppStore.getState();
     for (const c of Object.values(store.cases)) {
       if (c.rx.status === "loading" || c.rx.status === "pending") {

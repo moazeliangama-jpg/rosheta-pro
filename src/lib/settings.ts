@@ -3,6 +3,7 @@ import type { Settings } from "./types";
 /** الإعدادات الافتراضية — كل القيم حقيقية وبتتنفذ على نايس دير/واتساب */
 export const defaultSettings: Settings = {
   workplace: "",
+  workplaces: [],
   payerId: "",
   payerName: "",
   niceDeerUser: "",

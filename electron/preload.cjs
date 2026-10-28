@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("roshetta", {
   platform: process.platform,
-  version: "1.0.7",
+  version: "1.0.8",
 
   // نايس دير
   setCredentials: (payload) => ipcRenderer.invoke("nd:set-credentials", payload),
@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld("roshetta", {
   fetchFormImage: (payload) => ipcRenderer.invoke("nd:form-image", payload),
   deletes: () => ipcRenderer.invoke("nd:deletes"),
   retryDeletes: () => ipcRenderer.invoke("nd:retry-deletes"),
+  cancelDeletes: (p) => ipcRenderer.invoke("nd:cancel-deletes", p),
   logoutNiceDeer: () => ipcRenderer.invoke("nd:logout-everything"),
   openSearchSite: () => ipcRenderer.invoke("app:open-search-site"),
   preflight: () => ipcRenderer.invoke("app:preflight"),

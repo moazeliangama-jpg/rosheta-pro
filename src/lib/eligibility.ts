@@ -147,10 +147,33 @@ export function evaluateMonthly(input: {
   };
 }
 
+/** اسم مكان العمل زي ما بيتعرض — نفس المفتاح اللي بيتجمّع بيه */
+export function workplaceName(patient: { workplace?: string }) {
+  return (patient.workplace || "بدون مكان عمل").trim() || "بدون مكان عمل";
+}
+
+/**
+ * السابات اللي هتتراجع فعلًا: لو المستخدم مختار أماكن عمل، مفيش ساب من برّه
+ * الاختيار بيدخل التشغيل. مفيش اختيار = كل الأماكن.
+ */
+export function filterByWorkplaces<T extends { workplace?: string }>(patients: T[], selected: string[] | undefined): T[] {
+  const wanted = new Set((selected || []).map((w) => (w || "").trim()).filter(Boolean));
+  if (!wanted.size) return patients;
+  return patients.filter((p) => wanted.has(workplaceName(p)));
+}
+
+/** الاختيار الفعلي: القايمة الجديدة، ولو فاضية بنرجع للمكان الأساسي القديم */
+export function selectedWorkplaces(settings: { workplaces?: string[]; workplace?: string }): string[] {
+  const list = (settings.workplaces || []).map((w) => w.trim()).filter(Boolean);
+  if (list.length) return list;
+  const single = (settings.workplace || "").trim();
+  return single ? [single] : [];
+}
+
 export function groupByWorkplace(patients: PatientRow[]) {
   const map = new Map<string, PatientRow[]>();
   for (const p of patients) {
-    const key = (p.workplace || "بدون مكان عمل").trim();
+    const key = workplaceName(p);
     if (!map.has(key)) map.set(key, []);
     map.get(key)!.push(p);
   }
