@@ -119,7 +119,15 @@ export interface RoshettaBridge {
     load: () => Promise<BridgeResult<{ username: string; password: string } | null>>;
     clear: () => Promise<BridgeResult>;
   };
-  login: (p?: { username?: string; password?: string }) => Promise<BridgeResult & { already?: boolean }>;
+  login: (p?: { username?: string; password?: string }) => Promise<
+    BridgeResult & { already?: boolean; verified?: boolean; state?: string; trace?: string[]; files?: Record<string, string> | null; ms?: number }
+  >;
+  /** فتح نافذة نايس دير المرئية (تسجيل يدوي / عدّي التحقق البشري مرة واحدة) */
+  openLoginWindow: (p?: { url?: "login" | "search" }) => Promise<BridgeResult<{ url: string; hasCode: boolean }>>;
+  /** وضع نوافذ الأتمتة: خلفية مرئية (افتراضي، مش بتاخد التركيز) أو مخفية تمامًا */
+  setWindowMode: (p: { background: boolean }) => Promise<BridgeResult<{ background: boolean }>>;
+  /** آخر خطوات محاولة الدخول (تشخيص) */
+  loginTrace: () => Promise<BridgeResult<{ trace: string[] }>>;
   status: () => Promise<BridgeResult & { loggedIn?: boolean; workers?: number; info?: SystemInfo }>;
   searchSub: (p: { sab: string; payerId: string; payerName: string; timeoutMs?: number }) => Promise<
     BridgeResult<NdSearchResult> & { ms?: number }
