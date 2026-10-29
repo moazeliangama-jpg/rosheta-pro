@@ -6,6 +6,7 @@ import { cn } from "../lib/utils";
 import { downloadImage } from "../lib/excel";
 import { getCachedImage, getImage } from "../lib/imageCache";
 import { reportSave } from "../lib/saveFeedback";
+import { toast } from "../lib/toast";
 import { useAppStore } from "../lib/store";
 
 export const SOURCE_LABEL: Record<string, string> = {
@@ -283,5 +284,96 @@ export function RxLightbox({ c, onClose, onRetry }: { c: CaseRecord; onClose: ()
         Esc للإغلاق • + / - للتكبير • R للتدوير (Shift+R عكس الاتجاه)
       </div>
     </div>
+  );
+}
+
+/**
+ * لينك الروشتة الحقيقي في نايس دير.
+ *
+ * المستخدم طلب صريح: اللينك اللي بيتفتح من `Manage Documents` → التنزيل
+ * (`storage.googleapis.com/nicedeer/Eprescreption/...jpg`) يتحفظ ويتعرض في
+ * مرحلة القرار، ولما يدوس عليه الروشتة تفتح **٣ ثواني وتتقفل**.
+ * ده اللي بيحصل هنا: معاينة داخل البرنامج بعدّاد ٣ ثواني + نسخ الرابط.
+ */
+export function RxLinkButton({ c }: { c: CaseRecord }) {
+  const url = c.rx.url || "";
+  const [open, setOpen] = useState(false);
+  const [left, setLeft] = useState(3);
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setLeft(3);
+    setBroken(false);
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const remaining = 3 - Math.floor((Date.now() - started) / 1000);
+      if (remaining <= 0) {
+        clearInterval(timer);
+        setOpen(false);
+        setLeft(3);
+        return;
+      }
+      setLeft(remaining);
+    }, 200);
+    return () => clearInterval(timer);
+  }, [open]);
+
+  if (!url) return null;
+
+  return (
+    <>
+      <div className="flex items-center gap-1.5">
+        <Button size="sm" variant="ghost" className="flex-1" onClick={() => setOpen(true)}>
+          <Maximize2 className="h-3.5 w-3.5" /> فتح الروشتة (٣ ثواني)
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          title="نسخ رابط الروشتة"
+          onClick={() => {
+            void navigator.clipboard
+              ?.writeText(url)
+              .then(() => toast.ok("اتنسخ رابط الروشتة"))
+              .catch(() => toast.warn("المتصفح رفض النسخ — انسخ الرابط من تحت الصورة"));
+          }}
+        >
+          <Download className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      {open ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4"
+          onClick={() => setOpen(false)}
+          role="dialog"
+          aria-label="روشتة من نايس دير"
+        >
+          <div className="relative max-h-full max-w-3xl overflow-auto" onClick={(e) => e.stopPropagation()}>
+            <Badge tone="warn" className="absolute right-2 top-2 z-10">
+              هتتقفل خلال {left} ثانية
+            </Badge>
+            {broken ? (
+              <div className="max-w-md rounded-xl border border-white/15 bg-[#0b1416] p-4 text-center text-xs text-white/70">
+                <p className="mb-2">الصورة مش ظاهرة جوه البرنامج — افتح الرابط في المتصفح:</p>
+                <a href={url} target="_blank" rel="noreferrer" className="break-all text-teal-300 underline" dir="ltr">
+                  {url}
+                </a>
+              </div>
+            ) : (
+              <img
+                src={url}
+                alt={`روشتة ${c.reference || c.sab}`}
+                className="max-h-[85vh] w-auto rounded-xl bg-white"
+                onError={() => setBroken(true)}
+              />
+            )}
+            <div className="mt-2 text-center text-[10px] text-white/40" dir="ltr">
+              {url.slice(0, 120)}
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }

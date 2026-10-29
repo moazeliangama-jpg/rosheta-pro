@@ -750,6 +750,49 @@ const LOGIN_PROBE_SCRIPT = `(() => {
 })()`;
 
 /** نتيجة الإرجاع: هل الزرار اختفى/ظهرت رسالة نجاح بعد الضغط؟ */
+/**
+ * «Manage Documents» جوه صفحة الروشتة (`PrescriptionImgs`).
+ * الزرار اللي في الموقع شكله:
+ *   <button onclick="ManageDocument()"> Manage Documents </button>
+ * بنضغطه على الصفحة الحقيقية — مفيش أي تنفيذ يدوي للدالة من برّه.
+ */
+const CLICK_MANAGE_DOCS_SCRIPT = `(() => {
+  const sig = (el) => ((el.getAttribute && el.getAttribute('onclick')) || '') + ' ' + ((el.textContent || '').replace(/\\s+/g, ' ').trim());
+  const cands = [...document.querySelectorAll('button, a, div[role="button"], span[role="button"]')];
+  const hit = cands.find((el) => /ManageDocument/i.test(sig(el)) || /Manage\\s*Documents/i.test(el.textContent || ''));
+  if (!hit) return 'not-found';
+  hit.click();
+  return 'clicked';
+})()`;
+
+/**
+ * أيقونة تنزيل الروشتة (`i.Ndcolor.fa.fa-download`).
+ * لو الأيقونة جوّه لينك فيه الرابط النهائي بنرجّعه على طول (أسرع وأدق)،
+ * وإلا بنضغط على أقرب عنصر قابل للضغط — والرابط بيتلقط من الشبكة/النافذة الجديدة.
+ */
+const CLICK_DOWNLOAD_DOC_SCRIPT = `(() => {
+  const okUrl = (u) => /^https?:\\/\\//i.test(u || '') && (/storage\\.googleapis\\.com/i.test(u) || /\\.(jpe?g|png|webp|gif|pdf)(\\?|$)/i.test(u));
+  const icon = document.querySelector('i.Ndcolor.fa.fa-download, i.fa-download, .fa-download');
+  if (!icon) return 'not-found';
+  const target = icon.closest('a, button, .k-grid-download') || icon;
+  const href = target.getAttribute && (target.getAttribute('href') || '');
+  if (href && okUrl(href)) return href;
+  const onclick = (target.getAttribute && target.getAttribute('onclick')) || '';
+  const m = onclick.match(/['"](https?:[^'"]+)['"]/);
+  if (m && okUrl(m[1])) return m[1];
+  target.click();
+  return 'clicked';
+})()`;
+
+/** رابط الروشتة الظاهر في الصفحة (لينك أو صورة محمّلة) — احتياطي */
+const DOC_LINK_SCRIPT = `(() => {
+  const okUrl = (u) => /^https?:\\/\\//i.test(u || '') && (/storage\\.googleapis\\.com/i.test(u) || /Eprescreption/i.test(u) || /\\.(jpe?g|png|webp)(\\?|$)/i.test(u));
+  const links = [...document.querySelectorAll('a[href]')].map((a) => a.href).filter(okUrl);
+  if (links.length) return links[0];
+  const imgs = [...document.images].map((i) => i.currentSrc || i.src).filter(okUrl);
+  return imgs[0] || '';
+})()`;
+
 const DELETE_OUTCOME_SCRIPT = `(() => {
   const btn = document.querySelector('#btn-DeleteClaim');
   const body = (document.body && document.body.innerText) || '';
@@ -901,6 +944,9 @@ module.exports = {
   LOGIN_PROBE_SCRIPT,
   FETCH_IN_PAGE_SCRIPT,
   PROBE_SELECTORS_SCRIPT,
+  CLICK_MANAGE_DOCS_SCRIPT,
+  CLICK_DOWNLOAD_DOC_SCRIPT,
+  DOC_LINK_SCRIPT,
   DELETE_OUTCOME_SCRIPT,
   CLOSE_MODAL_SCRIPT,
   FIND_IMAGE_LINK_SCRIPT,

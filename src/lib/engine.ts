@@ -338,14 +338,16 @@ export class SessionEngine {
 
     this.timer = setInterval(() => this.tick(), 1200);
 
-    // تسخين النوافذ بالتوازي — بيفتح صفحة البحث مرة واحدة لكل نافذة
-    if (s0.turboMode) {
-      const warm = await b.warmup(this.workers);
-      if (warm.ok) {
-        this.log("ok", `تسخين ${warm.data?.workers ?? this.workers} نوافذ في ${warm.data?.ms ?? 0} مللي ثانية.`);
-      } else {
-        this.log("warn", `تسخين النوافذ لم يكتمل: ${warm.error ?? "سبب غير معروف"}`);
-      }
+    /**
+     * كل المتصفحات بتتفتح **فورًا** مع طلب الجرد (مش في الوضع المرعب بس):
+     * كل نافذة بتمر على صفحة الدخول بنفسها (`/Account/Login` → يوزر → باسورد
+     * → Log in) وبعدها صفحة البحث. ده اللي المستخدم بيشوفه بعينه.
+     */
+    const warm = await b.warmup(this.workers);
+    if (warm.ok) {
+      this.log("ok", `تسخين ${warm.data?.workers ?? this.workers} نوافذ في ${warm.data?.ms ?? 0} مللي ثانية.`);
+    } else {
+      this.log("warn", `تسخين النوافذ لم يكتمل: ${warm.error ?? "سبب غير معروف"}`);
     }
 
     this.log(
@@ -764,7 +766,8 @@ export class SessionEngine {
         });
         if (!res.ok || !res.data?.dataUrl) throw new Error(bridgeError(res, "لم تُرجع نافذة الروشتة صورة"));
 
-        store.setImage(c.id, res.data.dataUrl, res.data.method);
+        // الرابط الحقيقي للروشتة (لو اتلقط من Manage Documents → التنزيل)
+        store.setImage(c.id, res.data.dataUrl, res.data.method, (res.data as { rxUrl?: string }).rxUrl || "");
         store.patchCase(c.id, {
           deleted: Boolean(res.data.deleted),
           deleteState: res.data.deleteState || "unknown",
