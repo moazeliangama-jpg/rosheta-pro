@@ -113,3 +113,9 @@ test("فشل الصورة بيسجّل الصفحة اللي كانت مفتوح
   assert.match(main, /الصفحة وقت الفشل:/, "السجل بيقول الصفحة كانت إيه");
   assert.match(main, /saveWindowEvidence\(win, `image-/, "دليل مكتوب (صفحة + لقطة)");
 });
+
+test("فشل التقاط النافذة المنبثقة مابيعلّقش الشغل ٢٦ ثانية", () => {
+  const start = main.indexOf("const onChild = (child) =>");
+  const body = main.slice(start, start + 3500);
+  assert.match(body, /if \(!captured\) settle\(null\)/, "لازم يبلّغ بالفشل فورًا");
+});
