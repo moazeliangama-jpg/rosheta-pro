@@ -82,3 +82,34 @@ test("كل المتصفحات بتفتح مع طلب الجرد (مش في وض�
   const around = engine.slice(Math.max(0, start - 400), start);
   assert.doesNotMatch(around, /if \(s0\.turboMode\) \{/, "مش مربوط بالوضع المرعب");
 });
+
+test("بنستنى صفحة الروشتة تفتح فعلًا (مش ٦٠٠ مللي)", () => {
+  assert.match(main, /async function waitForClaimPage/, "انتظار حقيقي للصفحة");
+  const start = main.indexOf("async function waitForClaimPage");
+  assert.match(main.slice(start, start + 900), /timeoutMs = 14000/, "مهلة كافية لتحميل الصفحة");
+  const proc = main.slice(main.indexOf("async function processForm"));
+  assert.match(proc, /waitForClaimPage\(win, \{ from: resultsUrl/, "مسار نفس النافذة بيستنى التنقّل");
+  assert.doesNotMatch(proc, /Date\.now\(\) - started > 600/, "ممنوع الرجوع لمهلة ٦٠٠ مللي");
+});
+
+test("صفحة المطالبة بتتحسب روشتة (OpenClaim و PrescriptionImgs)", () => {
+  const start = main.indexOf("const isClaimPage");
+  const body = main.slice(start, start + 400);
+  assert.match(body, /Beneficiary\\\/Search\/i\.test\(text\)\) return false/, "صفحة البحث مش روشتة");
+  assert.match(body, /Account\\\/Login\/i\.test\(text\)\) return false/, "صفحة الدخول مش روشتة");
+  assert.match(body, /return true;/, "أي صفحة تانية على نايس دير = روشتة/مطالبة");
+  const proc = main.slice(main.indexOf("async function processForm"));
+  assert.match(proc, /isClaimPage\(wc\(win\)\.getURL\(\)\)/, "المودال/الصفحة اللي جوه نفس النافذة بتتحسب");
+});
+
+test("نافذة الروشتة بتفضل ظاهرة لحظة بعد الالتقاط", () => {
+  const start = main.indexOf("const onChild = (child) =>");
+  const body = main.slice(start, start + 3000);
+  assert.match(body, /setTimeout\(\(\) => \{[\s\S]{0,160}child\.destroy\(\)/, "بتتقفل بعد مهلة مش فورًا");
+  assert.match(body, /2500/, "لحظتين عشان المستخدم يشوف الروشتة");
+});
+
+test("فشل الصورة بيسجّل الصفحة اللي كانت مفتوحة والتفاصيل", () => {
+  assert.match(main, /الصفحة وقت الفشل:/, "السجل بيقول الصفحة كانت إيه");
+  assert.match(main, /saveWindowEvidence\(win, `image-/, "دليل مكتوب (صفحة + لقطة)");
+});

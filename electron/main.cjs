@@ -2405,6 +2405,42 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
  * النافذة بتتخلق بواسطة Electron نفسها (allow + override) وبتتلقط فورًا،
  * فمفيش تكلفة إنشاء نافذة إضافية ولا انتظار ثابت.
  */
+/**
+ * هل الصفحة دي صفحة مطالبة/روشتة (مش صفحة البحث ومش صفحة دخول)؟
+ * النقر على الرقم المرجعي في `#Table2` بينقل النافذة لـ`Claim/OpenClaim`،
+ * وفي `#Table` بينادي `CreatePreApprovalEprescription(...)`. الاتنين بيفتحوا
+ * على نفس السيرفر، فأي صفحة نايس دير غير البحث/الدخول بتتحسب صفحة روشتة.
+ */
+const isClaimPage = (url) => {
+  const text = String(url || "");
+  if (!/nicedeer\.net/i.test(text)) return false;
+  if (/Beneficiary\/Search/i.test(text)) return false;
+  if (/Account\/Login/i.test(text)) return false;
+  return true;
+};
+
+/**
+ * بنستنى الصفحة تفتح فعلًا — **مش ٦٠٠ مللي**.
+ * ده كان سبب «البرنامج مش عارف يعرض صورة الروشتة»: الصفحة بتاخد ثانيتين
+ * تحميل، فالمحاولة القديمة كانت بتخلص قبل ما التنقّل يحصل، والمستخدم يشوف
+ * الروشتة قدامه والبرنامج يقول مفيش صورة.
+ */
+async function waitForClaimPage(win, { from = "", timeoutMs = 14000 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (!win || win.isDestroyed()) return null;
+    let url = "";
+    try {
+      url = wc(win).getURL() || "";
+    } catch {
+      url = "";
+    }
+    if (url && url !== from && isClaimPage(url)) return url;
+    await sleep(100);
+  }
+  return null;
+}
+
 function armPopupCapture(win, ref = "") {
   const urls = [];
   /** روابط الروشتة الحقيقية اللي اتلقطت من صفحة المستندات (ملف الصورة نفسه) */
@@ -2489,8 +2525,17 @@ function armPopupCapture(win, ref = "") {
         // لو ماجاتش: النافذة تفضل **ظاهرة** دقيقة كاملة عشان المستخدم يشوف
         // الروشتة بعينه ويعرف إن المشكلة في القراءة/اللقطة مش في فتح الروشتة.
         if (!child.isDestroyed()) {
-          if (captured) child.destroy();
-          else setTimeout(() => {
+          if (captured) {
+            // الروشتة تفضل ظاهرة في نافذتها لحظتين — المستخدم لازم يشوفها
+            // بعينه وهي بتتقرا، وبعدها النافذة بتتقفل والشغل بيكمل.
+            setTimeout(() => {
+              try {
+                if (!child.isDestroyed()) child.destroy();
+              } catch {
+                /* تجاهل */
+              }
+            }, 2500);
+          } else setTimeout(() => {
             try {
               if (!child.isDestroyed()) child.destroy();
             } catch {
@@ -2784,28 +2829,22 @@ async function processForm(win, job) {
         return { ok: false, error: `الرقم المرجعي ${reference} غير موجود في الصفحة`, timings };
       }
       openedByUs = true;
+      let resultsUrl = "";
+      try {
+        resultsUrl = wc(win).getURL() || "";
+      } catch {
+        resultsUrl = "";
+      }
       capLog(ref, `تم الضغط على الرقم المرجعي (${clicked})`);
       timings.clickMs = Date.now() - t0 - (timings.searchMs || 0);
 
       // مساران بالتوازي: نافذة الصورة المنبثقة، أو تنقّل الصفحة نفسها
       const mainPromise = (async () => {
-        const nav = await new Promise((resolve) => {
-          const started = Date.now();
-          const tick = () => {
-            if (navigatedTo) return resolve(navigatedTo);
-            if (Date.now() - started > 600) return resolve(null);
-            setTimeout(tick, 25);
-          };
-          tick();
-        });
+        const nav = await waitForClaimPage(win, { from: resultsUrl, timeoutMs: 14000 });
         if (!nav || win.isDestroyed()) return null;
-        // صفحة الروشتة بس — صفحة البحث فيها لوجو كبير وكان ممكن يتعرض كأنه روشتة
-        if (!isPrescriptionUrl(nav)) {
-          capLog(ref, `تنقّل لصفحة مش روشتة: ${String(nav).slice(0, 120)}`);
-          return null;
-        }
-        await waitForLoad(win, 12000);
-        return captureImageInWindow(win, { timeoutMs: 6000 });
+        capLog(ref, `الصفحة اتفتحت: ${String(nav).slice(0, 120)}`);
+        await waitForLoad(win, 15000);
+        return captureImageInWindow(win, { timeoutMs: 12000 });
       })();
 
       // مسار تالت: الروشتة بتفتح **جوه نفس الصفحة** (مودال/أوفرلاي) — من غيره
@@ -2813,8 +2852,9 @@ async function processForm(win, job) {
       const inlinePromise = (async () => {
         await sleep(250);
         if (win.isDestroyed()) return null;
-        if (!isPrescriptionUrl(wc(win).getURL())) return null;
-        const res = await run(win, S.captureNewImageScript({ timeoutMs: 7000 }));
+        // أي صفحة نايس دير غير البحث = صفحة روشتة/مطالبة (مش بس PrescriptionImgs)
+        if (!isClaimPage(wc(win).getURL())) return null;
+        const res = await run(win, S.captureNewImageScript({ timeoutMs: 9000 }));
         if (res && res.srcUrl) {
           capLog(ref, "صورة روشتة ظهرت جوه الصفحة — بجيبها من الشبكة بنفس الجلسة");
           const net = await fetchImageViaSession(win, res.srcUrl, { referrer: SEARCH_URL });
@@ -2828,7 +2868,7 @@ async function processForm(win, job) {
         return null;
       })();
 
-      image = await firstSuccess([popup.childPromise, mainPromise, inlinePromise], TIMEOUTS.image + 4000);
+      image = await firstSuccess([popup.childPromise, mainPromise, inlinePromise], TIMEOUTS.image + 12000);
       if (image) capLog(ref, `الصورة اتجابت من نافذة/تنقّل (${image.method || "؟"})`);
     }
 
@@ -2889,6 +2929,16 @@ async function processForm(win, job) {
       // دليل حقيقي: الصفحة اللي كانت مفتوحة + صورتها وقت الفشل (من غير أي بيانات دخول)
       const evidence = await saveWindowEvidence(win, `image-${SEC.sanitizeSab(sab) || "sab"}-${reference}`);
       const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
+      let openUrl = "";
+      try {
+        openUrl = wc(win).getURL() || "";
+      } catch {
+        openUrl = "";
+      }
+      capLog(
+        ref,
+        `الصفحة وقت الفشل: ${String(openUrl).slice(0, 140)} · نوافذ: ${popup.urls.length} · تفاصيل: ${JSON.stringify(image?.diag || {}).slice(0, 200)}`,
+      );
       return {
         ok: false,
         error: `${
