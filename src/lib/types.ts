@@ -46,6 +46,12 @@ export interface RxImage {
   updatedAt: number;
   /** طريقة الالتقاط الحقيقية: canvas / fetch / screenshot / background */
   method?: string;
+  /**
+   * رابط ملف الروشتة الحقيقي في نايس دير
+   * (`storage.googleapis.com/nicedeer/Eprescreption/...jpg`) — بيتلقط من
+   * Manage Documents → التنزيل، وبيتعرض لينك في شاشة القرار.
+   */
+  url?: string;
 }
 
 export type Verdict = "available" | "unavailable" | null;

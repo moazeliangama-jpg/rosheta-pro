@@ -126,7 +126,7 @@ export interface AppState {
   upsertCases: (records: CaseRecord[]) => void;
   patchCase: (id: string, patch: Partial<CaseRecord>) => void;
   setRxStatus: (id: string, rx: RxImage) => void;
-  setImage: (id: string, dataUrl: string, method?: string) => void;
+  setImage: (id: string, dataUrl: string, method?: string, url?: string) => void;
   setHasDrugs: (id: string, value: Verdict) => void;
   /** ١٠٥) قرار جماعي لكل استمارات الساب — بيرجع عدد الاستمارات المتأثرة */
   setSabDecision: (sab: string, value: Verdict) => number;
@@ -419,7 +419,7 @@ export const useAppStore = create<AppState>()(
        * بتسجل إن الصورة جاهزة. الصورة نفسها بتتحفظ في IndexedDB وبتتقرأ عند العرض
        * — مش بنحتفظ بنسخة منها في حالة React عشان الذاكرة والحفظ يفضلوا سريعين.
        */
-      setImage: (id, dataUrl, method) => {
+      setImage: (id, dataUrl, method, url) => {
         putCachedImage(id, dataUrl);
         void saveImage(id, dataUrl);
         set((s) => {
@@ -430,7 +430,13 @@ export const useAppStore = create<AppState>()(
               ...s.cases,
               [id]: {
                 ...prev,
-                rx: { status: "ready", method, attempts: prev.rx.attempts, updatedAt: Date.now() },
+                rx: {
+                  status: "ready",
+                  method,
+                  url: url || prev.rx.url,
+                  attempts: prev.rx.attempts,
+                  updatedAt: Date.now(),
+                },
               },
             },
           };

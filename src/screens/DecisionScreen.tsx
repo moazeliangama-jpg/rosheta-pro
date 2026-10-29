@@ -23,7 +23,7 @@ import { orderedCases, monthlyList } from "../lib/engine";
 import { progressSummary } from "../lib/eligibility";
 import type { CaseRecord, MonthlyCheck } from "../lib/types";
 import { Badge, Button, Card, EmptyState, SectionTitle, Stat } from "../components/ui";
-import { RxImage, RxLightbox, SOURCE_LABEL } from "../components/RxViewer";
+import { RxImage, RxLightbox, RxLinkButton, SOURCE_LABEL } from "../components/RxViewer";
 import { SabDrugsView } from "../components/SabDrugsView";
 import { cn } from "../lib/utils";
 import { reportSave } from "../lib/saveFeedback";
@@ -666,6 +666,10 @@ function CaseCard({
             …
           </div>
         )}
+      </div>
+
+      <div className="px-3 pb-1">
+        <RxLinkButton c={c} />
       </div>
 
       <div className="flex items-center gap-2 px-3 py-2">

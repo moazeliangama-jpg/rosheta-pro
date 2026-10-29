@@ -1551,17 +1551,54 @@ async function copyAuthCookies(win) {
   }
 }
 
-/** دخول النافذة المعزولة: ننسخ الهوية الأول، ولو ما نفعش ندخل ببيانات الحساب */
+/**
+ * دخول **في نفس المتصفح** — زي ما المستخدم بيعمله بإيده:
+ * `https://nicedeer.net/Account/Login` → `#UserName` → `#passwordInput`
+ * → `#loginBTN`. كل متصفح بيسجّل دخوله بنفسه، وبيانات الإعداد هي اللي بتتكتب
+ * في كل واحد فيهم.
+ *
+ * القفل هنا لكل **نافذة** (مش قفل عام): نوافذ مختلفة بتدخل في نفس الوقت، لكن
+ * نفس النافذة مش بتدخل مرتين. وبنفرّق المحاولات بكسر بسيط عشان السيرفر
+ * ميشوفش عشر محاولات دخول في نفس اللحظة.
+ */
+const windowLoginPromises = new Map();
+let loginStagger = 0;
+
+async function loginInWindow(win, creds) {
+  if (!win || win.isDestroyed()) throw new LoginError("المتصفح اتقفل قبل الدخول", "no-window");
+  const key = win.id;
+  const running = windowLoginPromises.get(key);
+  if (running) return running;
+  const delay = Math.min(6000, (loginStagger += 1) * 600);
+  const task = (async () => {
+    if (delay) await sleep(delay);
+    traceStep(`دخول في المتصفح #${key} (${win.__rpLabel || "نافذة"})`);
+    return runLoginSteps(win, creds, { challengeWaitMs: 30000, interactive: false, tag: `login-win-${key}` });
+  })().finally(() => windowLoginPromises.delete(key));
+  windowLoginPromises.set(key, task);
+  return task;
+}
+
+/**
+ * دخول النافذة المعزولة: **دخول حقيقي في نفس المتصفح أولًا** (طلب المستخدم)،
+ * ولو الموقع عمل تحقق بشري أو رفض، بننسخ هوية الجلسة الأساسية وبنكمّل —
+ * عشان متبقاش نافذة واحدة بتوقف الجرد كله.
+ */
 async function loginIntoIsolatedWindow(win, credentials) {
+  try {
+    await loginInWindow(win, credentials);
+    await safeLoad(win, SEARCH_URL);
+    if (await run(win, S.waitForSelectorScript("#SearchCode", 15000))) return "logged-in";
+  } catch (err) {
+    traceStep(`الدخول في نفس المتصفح ما كملش (${String(err?.message || err).slice(0, 80)}) — بنجرّب هوية الجلسة`);
+  }
   const copied = await copyAuthCookies(win);
   if (copied) {
     await safeLoad(win, SEARCH_URL);
-    const ok = await run(win, S.waitForSelectorScript("#SearchCode", 15000));
-    if (ok) return "shared-auth";
+    if (await run(win, S.waitForSelectorScript("#SearchCode", 15000))) return "shared-auth";
   }
-  // دخول في جلسة النافذة نفسها — ولو السيرفر طلب تحقّق بشرى بنفسح لنافذة الدخول
+  // آخر حل: نافذة دخول مرئية (المستخدم بيعدّي التحقق بإيده)
   await loginOnce(win, credentials);
-  // بعد أي دخول ناجح: نضمن إن الهوية موجودة في الجلسة المعزولة دي بالتحديد
   await copyAuthCookies(win);
   await safeLoad(win, SEARCH_URL);
   return "logged-in";
@@ -2368,8 +2405,46 @@ async function captureImageInWindow(win, { timeoutMs = TIMEOUTS.image, minSide =
  * النافذة بتتخلق بواسطة Electron نفسها (allow + override) وبتتلقط فورًا،
  * فمفيش تكلفة إنشاء نافذة إضافية ولا انتظار ثابت.
  */
+/**
+ * هل الصفحة دي صفحة مطالبة/روشتة (مش صفحة البحث ومش صفحة دخول)؟
+ * النقر على الرقم المرجعي في `#Table2` بينقل النافذة لـ`Claim/OpenClaim`،
+ * وفي `#Table` بينادي `CreatePreApprovalEprescription(...)`. الاتنين بيفتحوا
+ * على نفس السيرفر، فأي صفحة نايس دير غير البحث/الدخول بتتحسب صفحة روشتة.
+ */
+const isClaimPage = (url) => {
+  const text = String(url || "");
+  if (!/nicedeer\.net/i.test(text)) return false;
+  if (/Beneficiary\/Search/i.test(text)) return false;
+  if (/Account\/Login/i.test(text)) return false;
+  return true;
+};
+
+/**
+ * بنستنى الصفحة تفتح فعلًا — **مش ٦٠٠ مللي**.
+ * ده كان سبب «البرنامج مش عارف يعرض صورة الروشتة»: الصفحة بتاخد ثانيتين
+ * تحميل، فالمحاولة القديمة كانت بتخلص قبل ما التنقّل يحصل، والمستخدم يشوف
+ * الروشتة قدامه والبرنامج يقول مفيش صورة.
+ */
+async function waitForClaimPage(win, { from = "", timeoutMs = 14000 } = {}) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (!win || win.isDestroyed()) return null;
+    let url = "";
+    try {
+      url = wc(win).getURL() || "";
+    } catch {
+      url = "";
+    }
+    if (url && url !== from && isClaimPage(url)) return url;
+    await sleep(100);
+  }
+  return null;
+}
+
 function armPopupCapture(win, ref = "") {
   const urls = [];
+  /** روابط الروشتة الحقيقية اللي اتلقطت من صفحة المستندات (ملف الصورة نفسه) */
+  const docUrls = [];
   let settled = false;
   let resolveChild;
   const childPromise = new Promise((resolve) => {
@@ -2431,12 +2506,36 @@ function armPopupCapture(win, ref = "") {
           settle(image);
         }
       } finally {
+        /**
+         * رابط الروشتة: بيتلقط من **نفس النافذة** بعد الصورة وقبل قفلها
+         * (Manage Documents → أيقونة التنزيل → رابط الملف).
+         * من غير الخطوة دي كان البرنامج بيعرض لقطة شاشة بس، والمستخدم عايز
+         * يفتح الروشتة الحقيقية من اللينك في مرحلة القرار.
+         */
+        try {
+          const docUrl = await extractPrescriptionUrl(child);
+          if (docUrl) {
+            docUrls.push(docUrl);
+            capLog(ref, `رابط الروشتة: ${docUrl.slice(0, 140)}`);
+          }
+        } catch {
+          /* الرابط مش حرج — اللقطة موجودة كاحتياطي */
+        }
         // لو الصورة اتجابت: النافذة اتقفلت فورًا (الشغل مستمر).
         // لو ماجاتش: النافذة تفضل **ظاهرة** دقيقة كاملة عشان المستخدم يشوف
         // الروشتة بعينه ويعرف إن المشكلة في القراءة/اللقطة مش في فتح الروشتة.
         if (!child.isDestroyed()) {
-          if (captured) child.destroy();
-          else setTimeout(() => {
+          if (captured) {
+            // الروشتة تفضل ظاهرة في نافذتها لحظتين — المستخدم لازم يشوفها
+            // بعينه وهي بتتقرا، وبعدها النافذة بتتقفل والشغل بيكمل.
+            setTimeout(() => {
+              try {
+                if (!child.isDestroyed()) child.destroy();
+              } catch {
+                /* تجاهل */
+              }
+            }, 2500);
+          } else setTimeout(() => {
             try {
               if (!child.isDestroyed()) child.destroy();
             } catch {
@@ -2479,17 +2578,123 @@ function armPopupCapture(win, ref = "") {
           /* تجاهل */
         }
         if (image) {
+          try {
+            const docUrl = await extractPrescriptionUrl(candidate);
+            if (docUrl) docUrls.push(docUrl);
+          } catch {
+            /* تجاهل */
+          }
           settle(image);
           return image;
         }
       }
       return null;
     },
+    /** رابط الروشتة اللي اتلقط (أول واحد) */
+    docUrl() {
+      return docUrls[0] || null;
+    },
+    docUrls,
     dispose() {
       wc(win).off("did-create-window", onChild);
       if (!win.isDestroyed()) wc(win).setWindowOpenHandler(DEFAULT_POPUP_HANDLER);
     },
   };
+}
+
+/**
+ * رابط الروشتة الحقيقي (ملف الصورة نفسه) من صفحة الروشتة.
+ *
+ * ترتيب الموقع نفسه (اللي المستخدم بيشرحه):
+ *   الضغط على الرقم المرجعي → نافذة `PrescriptionImgs` فيها صورة الروشتة
+ *   → زر **Manage Documents** → أيقونة التنزيل (`i.Ndcolor.fa.fa-download`)
+ *   → تفتح تاب جديدة فيها رابط الملف:
+ *   `https://storage.googleapis.com/nicedeer/Eprescreption/...jpg`
+ *
+ * الرابط ده هو اللي بيتحفظ ويتعرض في مرحلة القرار (المستخدم يضغط عليه يفتح
+ * الروشتة ٣ ثواني وتتقفل). اللقطة الشاشية بقت احتياطي مش الأساس.
+ *
+ * الالتقاط من ٣ مسارات حقيقية، لأن زر التنزيل ممكن يفتح تاب أو ينزّل الملف:
+ *   ١) نافذة/تاب جديد (`setWindowOpenHandler`).
+ *   ٢) تنقّل في نفس الصفحة (`will-navigate` / `will-redirect`).
+ *   ٣) تنزيل فعلي (`will-download`) — بنقرا رابطه وبنلغي التنزيل نفسه.
+ */
+async function extractPrescriptionUrl(win, { timeoutMs = 9000 } = {}) {
+  const page = contentOf(win);
+  if (!page || page.isDestroyed()) return null;
+  const found = [];
+  const take = (value) => {
+    const abs = String(value || "").trim();
+    if (!abs || found.includes(abs)) return;
+    if (!/^https?:\/\//i.test(abs)) return;
+    if (/storage\.googleapis\.com/i.test(abs) || /Eprescreption/i.test(abs) || /\.(jpe?g|png|webp|gif|pdf)(\?|$)/i.test(abs)) {
+      found.push(abs);
+    }
+  };
+
+  const previousHandler = page.__rpDocHandler || null;
+  page.setWindowOpenHandler(({ url }) => {
+    take(url);
+    return { action: "deny" };
+  });
+  const onNav = (_event, url) => take(url);
+  page.on("will-navigate", onNav);
+  page.on("will-redirect", onNav);
+  const ses = page.session;
+  const onDownload = (_event, item) => {
+    try {
+      take(item.getURL());
+    } catch {
+      /* تجاهل */
+    }
+    try {
+      item.cancel();
+    } catch {
+      /* تجاهل */
+    }
+  };
+  ses.on("will-download", onDownload);
+
+  try {
+    // ١) الرابط ممكن يكون ظاهر أصلًا في الصفحة (لينك أو صورة)
+    const direct = await run(win, S.DOC_LINK_SCRIPT);
+    if (direct) take(direct);
+
+    if (!found.length) {
+      // ٢) Manage Documents
+      const managed = await run(win, S.CLICK_MANAGE_DOCS_SCRIPT);
+      if (managed === "clicked") capLog("docs", "Manage Documents: اتضغط");
+      // نستنى ظهور المستندات (الشبكة بترجع الصفوف)
+      const started = Date.now();
+      while (!found.length && Date.now() - started < 4000) await sleep(120);
+    }
+
+    if (!found.length) {
+      // ٣) أيقونة التنزيل
+      const clicked = await run(win, S.CLICK_DOWNLOAD_DOC_SCRIPT);
+      if (clicked && clicked !== "clicked" && clicked !== "not-found") take(clicked);
+      if (clicked === "not-found") capLog("docs", "أيقونة التنزيل مش موجودة في الصفحة");
+      const started = Date.now();
+      while (!found.length && Date.now() - started < timeoutMs) await sleep(120);
+    }
+  } catch (err) {
+    capLog("docs", `استخراج رابط الروشتة: ${String(err?.message || err).slice(0, 120)}`);
+  } finally {
+    try {
+      page.off("will-navigate", onNav);
+      page.off("will-redirect", onNav);
+    } catch {
+      /* تجاهل */
+    }
+    try {
+      ses.off("will-download", onDownload);
+    } catch {
+      /* تجاهل */
+    }
+    if (!page.isDestroyed()) page.setWindowOpenHandler(previousHandler || DEFAULT_POPUP_HANDLER);
+  }
+
+  return found[0] || null;
 }
 
 /**
@@ -2624,28 +2829,22 @@ async function processForm(win, job) {
         return { ok: false, error: `الرقم المرجعي ${reference} غير موجود في الصفحة`, timings };
       }
       openedByUs = true;
+      let resultsUrl = "";
+      try {
+        resultsUrl = wc(win).getURL() || "";
+      } catch {
+        resultsUrl = "";
+      }
       capLog(ref, `تم الضغط على الرقم المرجعي (${clicked})`);
       timings.clickMs = Date.now() - t0 - (timings.searchMs || 0);
 
       // مساران بالتوازي: نافذة الصورة المنبثقة، أو تنقّل الصفحة نفسها
       const mainPromise = (async () => {
-        const nav = await new Promise((resolve) => {
-          const started = Date.now();
-          const tick = () => {
-            if (navigatedTo) return resolve(navigatedTo);
-            if (Date.now() - started > 600) return resolve(null);
-            setTimeout(tick, 25);
-          };
-          tick();
-        });
+        const nav = await waitForClaimPage(win, { from: resultsUrl, timeoutMs: 14000 });
         if (!nav || win.isDestroyed()) return null;
-        // صفحة الروشتة بس — صفحة البحث فيها لوجو كبير وكان ممكن يتعرض كأنه روشتة
-        if (!isPrescriptionUrl(nav)) {
-          capLog(ref, `تنقّل لصفحة مش روشتة: ${String(nav).slice(0, 120)}`);
-          return null;
-        }
-        await waitForLoad(win, 12000);
-        return captureImageInWindow(win, { timeoutMs: 6000 });
+        capLog(ref, `الصفحة اتفتحت: ${String(nav).slice(0, 120)}`);
+        await waitForLoad(win, 15000);
+        return captureImageInWindow(win, { timeoutMs: 12000 });
       })();
 
       // مسار تالت: الروشتة بتفتح **جوه نفس الصفحة** (مودال/أوفرلاي) — من غيره
@@ -2653,8 +2852,9 @@ async function processForm(win, job) {
       const inlinePromise = (async () => {
         await sleep(250);
         if (win.isDestroyed()) return null;
-        if (!isPrescriptionUrl(wc(win).getURL())) return null;
-        const res = await run(win, S.captureNewImageScript({ timeoutMs: 7000 }));
+        // أي صفحة نايس دير غير البحث = صفحة روشتة/مطالبة (مش بس PrescriptionImgs)
+        if (!isClaimPage(wc(win).getURL())) return null;
+        const res = await run(win, S.captureNewImageScript({ timeoutMs: 9000 }));
         if (res && res.srcUrl) {
           capLog(ref, "صورة روشتة ظهرت جوه الصفحة — بجيبها من الشبكة بنفس الجلسة");
           const net = await fetchImageViaSession(win, res.srcUrl, { referrer: SEARCH_URL });
@@ -2668,7 +2868,7 @@ async function processForm(win, job) {
         return null;
       })();
 
-      image = await firstSuccess([popup.childPromise, mainPromise, inlinePromise], TIMEOUTS.image + 4000);
+      image = await firstSuccess([popup.childPromise, mainPromise, inlinePromise], TIMEOUTS.image + 12000);
       if (image) capLog(ref, `الصورة اتجابت من نافذة/تنقّل (${image.method || "؟"})`);
     }
 
@@ -2729,6 +2929,16 @@ async function processForm(win, job) {
       // دليل حقيقي: الصفحة اللي كانت مفتوحة + صورتها وقت الفشل (من غير أي بيانات دخول)
       const evidence = await saveWindowEvidence(win, `image-${SEC.sanitizeSab(sab) || "sab"}-${reference}`);
       const files = evidence ? ` — الدليل: ${Object.values(evidence).join(" | ")}` : "";
+      let openUrl = "";
+      try {
+        openUrl = wc(win).getURL() || "";
+      } catch {
+        openUrl = "";
+      }
+      capLog(
+        ref,
+        `الصفحة وقت الفشل: ${String(openUrl).slice(0, 140)} · نوافذ: ${popup.urls.length} · تفاصيل: ${JSON.stringify(image?.diag || {}).slice(0, 200)}`,
+      );
       return {
         ok: false,
         error: `${
@@ -2782,6 +2992,23 @@ async function processForm(win, job) {
       }
     }
 
+    /**
+     * رابط الروشتة النهائي اللي بيتعرض في مرحلة القرار.
+     * لو النافذة المنبثقة ماجاتش (الروشتة اتفتحت في نفس الصفحة/مودال)، بنعمل
+     * نفس خطوات المستخدم: Manage Documents → التنزيل → نلقط رابط الملف.
+     */
+    let rxUrl = popup.docUrl();
+    if (!rxUrl) {
+      try {
+        if (isPrescriptionUrl(wc(win).getURL())) {
+          rxUrl = await extractPrescriptionUrl(win, { timeoutMs: 6000 });
+          if (rxUrl) capLog(ref, `رابط الروشتة (نفس الصفحة): ${rxUrl.slice(0, 140)}`);
+        }
+      } catch {
+        /* الرابط مش حرج */
+      }
+    }
+
     // رجوع فوري لصفحة النتائج (بتوفر بحث كامل للاستمارة اللي بعدها)
     if (navigatedTo) {
       try {
@@ -2795,6 +3022,8 @@ async function processForm(win, job) {
     return {
       ok: true,
       dataUrl: image.dataUrl,
+      /** رابط ملف الروشتة الحقيقي — بيتحفظ ويتعرض في شاشة القرار */
+      rxUrl: rxUrl || "",
       method: image.method || "unknown",
       width: image.width,
       height: image.height,
